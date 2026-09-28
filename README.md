@@ -31,7 +31,7 @@ Herramienta de escritorio en Python / PySide6 diseñada para astrofotografía de
 ---
 
 ## Estructura del Proyecto
-
+```text
 apilador_astro/
 ├── run_app.py               # Punto de entrada de la aplicacion
 ├── requirements.txt         # Dependencias del entorno
@@ -49,8 +49,7 @@ apilador_astro/
     ├── tab_developer.py     # Pestana del Revelador / Editor
     ├── main_window.py       # Ventana principal contenedora
     └── worker.py            # Hilos secundarios en segundo plano (QThread)
-
----
+```
 
 ## Instalacion y Requisitos
 
@@ -59,8 +58,10 @@ apilador_astro/
 * Windows 10 / 11 de 64 bits.
 
 ### 1. Clonar el repositorio
+```cmd
 git clone https://github.com/shilmar/apilator.git
 cd apilator
+```
 
 ### 2. Instalar dependencias
 pip install -r requirements.txt
