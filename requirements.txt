@@ -1,0 +1,7 @@
+PySide6>=6.5.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+rawpy>=0.19.0
+tifffile>=2023.7.0
+astropy>=5.3.0
+graxpert>=3.0.0
