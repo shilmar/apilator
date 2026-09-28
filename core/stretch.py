@@ -1,43 +1,43 @@
 # core/stretch.py
 import numpy as np
 
-def asinh_stretch(image_float: np.ndarray, stretch: float = 3.0, black_point: float = 0.0) -> np.ndarray:
-    img = np.maximum(0.0, image_float - black_point)
-    if stretch <= 0.0:
-        return np.clip(img, 0.0, 1.0)
-    stretched = np.arcsinh(img * stretch) / np.arcsinh(stretch)
-    return np.clip(stretched, 0.0, 1.0)
-
-def auto_mtf_stretch(image_float: np.ndarray, target_bg: float = 0.25) -> np.ndarray:
-    med = float(np.median(image_float))
-    abs_diff = np.abs(image_float - med)
-    mad = float(np.median(abs_diff))
+def calculate_mtf_params(img_float: np.ndarray, target_background: float = 0.20):
+    """
+    Calcula el punto negro estadístico y el punto de medios tonos 'm' de la curva MTF.
+    """
+    sample = img_float[::4, ::4]
+    med = float(np.median(sample))
+    mad = float(np.median(np.abs(sample - med)))
     
-    shadows = max(0.0, med - 2.8 * (1.4826 * mad))
-    x = med - shadows
-    if x <= 0:
+    # Punto negro sugerido: justo bajo el ruido de fondo
+    bp = float(np.clip(med - 1.5 * mad, 0.0, 0.95))
+    
+    # Estimación analítica del parámetro 'm' de MTF para llevar el fondo a target_background
+    norm_med = max(1e-6, (med - bp) / max(1e-6, 1.0 - bp))
+    denom = norm_med * (2.0 * target_background - 1.0) - target_background
+    if abs(denom) < 1e-7:
         m = 0.5
     else:
-        m = (x * (target_bg - 1.0)) / (x * (2.0 * target_bg - 1.0) - target_bg)
-        m = float(np.clip(m, 0.001, 0.999))
+        m = (norm_med * (target_background - 1.0)) / denom
+    
+    m = float(np.clip(m, 0.0001, 0.9999))
+    return bp, m
 
-    normalized = np.clip((image_float - shadows) / (1.0 - shadows + 1e-7), 0.0, 1.0)
-    out = ((m - 1.0) * normalized) / ((2.0 * m - 1.0) * normalized - m)
-    return np.clip(out, 0.0, 1.0)
+def mtf_curve(x: np.ndarray, m: float) -> np.ndarray:
+    """Función de transferencia de medios tonos estándar (Midtone Transfer Function)."""
+    # MTF(x, m) = (m - 1) * x / ((2m - 1) * x - m)
+    num = (m - 1.0) * x
+    den = (2.0 * m - 1.0) * x - m
+    return np.where(np.abs(den) > 1e-7, num / den, 0.0)
 
-def stretch_display_image(img_float: np.ndarray, exposure_boost: float = 1.8, contrast: float = 1.2) -> np.ndarray:
-    lifted = np.clip(img_float * exposure_boost, 0.0, 1.0)
-    x = lifted - 0.5
-    curve = 1.0 / (1.0 + np.exp(-contrast * 6.0 * x))
-    c_min = 1.0 / (1.0 + np.exp(contrast * 3.0))
-    c_max = 1.0 / (1.0 + np.exp(-contrast * 3.0))
-    stretched = (curve - c_min) / (c_max - c_min + 1e-7)
-    return np.clip(stretched, 0.0, 1.0)
+def auto_mtf_stretch(img_float: np.ndarray, target_background: float = 0.20):
+    bp, m = calculate_mtf_params(img_float, target_background)
+    stretched = manual_stretch(img_float, black_point=bp, midtone=m)
+    return stretched, bp, m
 
-def manual_stretch(image_float: np.ndarray, black_point: float = 0.0, stretch_factor: float = 5.0) -> np.ndarray:
-    bp = np.clip(black_point, 0.0, 0.95)
-    normalized = np.maximum(0.0, image_float - bp) / (1.0 - bp + 1e-7)
-    if stretch_factor <= 0.1:
-        return np.clip(normalized, 0.0, 1.0)
-    stretched = np.arcsinh(normalized * stretch_factor) / np.arcsinh(stretch_factor)
-    return np.clip(stretched, 0.0, 1.0)
+def manual_stretch(img_float: np.ndarray, black_point: float = 0.0, midtone: float = 0.1):
+    # 1. Recorte y re-escalado del punto negro
+    clipped = np.clip((img_float - black_point) / max(1e-6, 1.0 - black_point), 0.0, 1.0)
+    # 2. Aplicación directa de curva MTF con el 'm' elegido
+    stretched = mtf_curve(clipped, max(1e-5, min(0.9999, midtone)))
+    return np.clip(stretched, 0.0, 1.0).astype(np.float32)

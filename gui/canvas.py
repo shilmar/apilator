@@ -68,7 +68,10 @@ class MaskCanvas(QWidget):
         h, w = self.orig_rgb.shape[:2]
 
         if display_stretched is None:
-            display = np.clip(np.power(self.orig_rgb, 0.5) * 255.0, 0, 255).astype(np.uint8)
+            # En lugar de power(0.5) simple, normalizamos por el percentil 99 para garantizar visibilidad básica
+            p_hi = np.percentile(self.orig_rgb, 99.5) if np.max(self.orig_rgb) > 0 else 1.0
+            norm = np.clip(self.orig_rgb / max(p_hi, 1e-4), 0.0, 1.0)
+            display = (np.power(norm, 0.4) * 255.0).astype(np.uint8)
         else:
             display = (np.clip(display_stretched, 0.0, 1.0) * 255.0).astype(np.uint8)
 

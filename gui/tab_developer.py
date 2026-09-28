@@ -69,28 +69,49 @@ class DeveloperTab(QWidget):
         left_layout.addWidget(grp_graxpert)
 
         # Ajuste tonal y estirado
-        grp_stretch = QGroupBox("Estirado Tonal (Non-Destructive)")
+        grp_stretch = QGroupBox("Estirado Tonal (Curva MTF)")
         stretch_layout = QVBoxLayout(grp_stretch)
+        stretch_layout.setSpacing(6)
 
         btn_auto_mtf = QPushButton("Auto-Estirado MTF")
         btn_auto_mtf.clicked.connect(self.apply_auto_mtf)
         stretch_layout.addWidget(btn_auto_mtf)
 
-        self.lbl_bp = QLabel("Punto Negro: 0.000")
-        stretch_layout.addWidget(self.lbl_bp)
+        # Control Punto Negro (Label + SpinBox numérico en fila, Slider debajo)
+        row_bp = QHBoxLayout()
+        row_bp.addWidget(QLabel("Punto Negro:"))
+        self.spin_bp = QDoubleSpinBox()
+        self.spin_bp.setDecimals(5)
+        self.spin_bp.setRange(0.0, 0.20000)
+        self.spin_bp.setSingleStep(0.00010)
+        self.spin_bp.setValue(0.0)
+        self.spin_bp.valueChanged.connect(self.on_spin_bp_changed)
+        row_bp.addWidget(self.spin_bp)
+        stretch_layout.addLayout(row_bp)
+
         self.slider_bp = QSlider(Qt.Horizontal)
-        self.slider_bp.setRange(0, 500)
+        self.slider_bp.setRange(0, 2000)  # Mapea 0.0 a 0.20 con 2000 pasos
         self.slider_bp.setValue(0)
-        self.slider_bp.valueChanged.connect(self.update_stretch_preview)
+        self.slider_bp.valueChanged.connect(self.on_slider_bp_changed)
         stretch_layout.addWidget(self.slider_bp)
 
-        self.lbl_stretch = QLabel("Estirado (Asinh): 5.0")
-        stretch_layout.addWidget(self.lbl_stretch)
-        self.slider_asinh = QSlider(Qt.Horizontal)
-        self.slider_asinh.setRange(1, 100)
-        self.slider_asinh.setValue(10)
-        self.slider_asinh.valueChanged.connect(self.update_stretch_preview)
-        stretch_layout.addWidget(self.slider_asinh)
+        # Control Medios Tonos MTF (Label + SpinBox numérico en fila, Slider debajo)
+        row_mtf = QHBoxLayout()
+        row_mtf.addWidget(QLabel("Medios Tonos (m):"))
+        self.spin_mtf = QDoubleSpinBox()
+        self.spin_mtf.setDecimals(5)
+        self.spin_mtf.setRange(0.00010, 0.50000)
+        self.spin_mtf.setSingleStep(0.00050)
+        self.spin_mtf.setValue(0.10000)
+        self.spin_mtf.valueChanged.connect(self.on_spin_mtf_changed)
+        row_mtf.addWidget(self.spin_mtf)
+        stretch_layout.addLayout(row_mtf)
+
+        self.slider_mtf = QSlider(Qt.Horizontal)
+        self.slider_mtf.setRange(1, 2000)  # Mapea 0.0001 a 0.50 con 2000 pasos
+        self.slider_mtf.setValue(400)
+        self.slider_mtf.valueChanged.connect(self.on_slider_mtf_changed)
+        stretch_layout.addWidget(self.slider_mtf)
 
         btn_reset = QPushButton("Restablecer Ajustes")
         btn_reset.clicked.connect(self.reset_sliders)
@@ -133,8 +154,9 @@ class DeveloperTab(QWidget):
         self.log_message(f"Cargando imagen: {os.path.basename(filepath)}...")
         try:
             self.image_32bit = load_image_as_float32(filepath)
-            self.update_stretch_preview()
-            self.log_message(f"Imagen lista en memoria ({self.image_32bit.shape[1]}x{self.image_32bit.shape[0]} px).")
+            # En lugar de ir al estirado manual plano, aplicamos Auto-MTF de cortesía
+            self.apply_auto_mtf()
+            self.log_message(f"Imagen lista en memoria ({self.image_32bit.shape[1]}x{self.image_32bit.shape[0]} px). Vista Auto-MTF aplicada.")
         except Exception as e:
             self.log_message(f"[ERROR] No se pudo cargar: {e}")
             QMessageBox.critical(self, "Error", f"Fallo al abrir archivo:\n{e}")
@@ -147,26 +169,78 @@ class DeveloperTab(QWidget):
         if p:
             self.load_image_direct(p)
 
-    def update_stretch_preview(self):
-        if self.image_32bit is None: return
-        bp_val = self.slider_bp.value() / 1000.0
-        stretch_factor = self.slider_asinh.value() * 0.5
-        self.lbl_bp.setText(f"Punto Negro: {bp_val:.3f}")
-        self.lbl_stretch.setText(f"Estirado (Asinh): {stretch_factor:.1f}")
+    # --- Eventos de Cambio Bidireccional ---
 
-        stretched = manual_stretch(self.image_32bit, black_point=bp_val, stretch_factor=stretch_factor)
+    def on_slider_bp_changed(self, val: int):
+        bp = (val / 2000.0) * 0.20
+        self.spin_bp.blockSignals(True)
+        self.spin_bp.setValue(bp)
+        self.spin_bp.blockSignals(False)
+        self.update_stretch_preview()
+
+    def on_spin_bp_changed(self, val: float):
+        slider_val = int(np.clip((val / 0.20) * 2000.0, 0, 2000))
+        self.slider_bp.blockSignals(True)
+        self.slider_bp.setValue(slider_val)
+        self.slider_bp.blockSignals(False)
+        self.update_stretch_preview()
+
+    def on_slider_mtf_changed(self, val: int):
+        m = max(0.0001, (val / 2000.0) * 0.50)
+        self.spin_mtf.blockSignals(True)
+        self.spin_mtf.setValue(m)
+        self.spin_mtf.blockSignals(False)
+        self.update_stretch_preview()
+
+    def on_spin_mtf_changed(self, val: float):
+        slider_val = int(np.clip((val / 0.50) * 2000.0, 1, 2000))
+        self.slider_mtf.blockSignals(True)
+        self.slider_mtf.setValue(slider_val)
+        self.slider_mtf.blockSignals(False)
+        self.update_stretch_preview()
+
+    # --- Actualización del Render y Sincronización ---
+
+    def update_stretch_preview(self):
+        if self.image_32bit is None:
+            return
+        bp_val = self.spin_bp.value()
+        m_val = self.spin_mtf.value()
+
+        stretched = manual_stretch(self.image_32bit, black_point=bp_val, midtone=m_val)
         self.canvas.load_image(self.image_32bit, display_stretched=stretched)
 
     def apply_auto_mtf(self):
-        if self.image_32bit is None: return
-        stretched = auto_mtf_stretch(self.image_32bit)
+        if self.image_32bit is None:
+            return
+        stretched, bp_suggested, m_suggested = auto_mtf_stretch(self.image_32bit)
         self.canvas.load_image(self.image_32bit, display_stretched=stretched)
-        self.log_message("Aplicado Auto-MTF Stretch al visor.")
+        self.sync_controls(bp_suggested, m_suggested)
+        self.log_message(f"Auto-MTF aplicado (Punto Negro: {bp_suggested:.5f}, MTF m: {m_suggested:.5f}).")
+
+    def sync_controls(self, bp: float, m: float):
+        # Bloquear todas las señales para evitar disparar cálculos redundantes
+        self.spin_bp.blockSignals(True)
+        self.slider_bp.blockSignals(True)
+        self.spin_mtf.blockSignals(True)
+        self.slider_mtf.blockSignals(True)
+
+        self.spin_bp.setValue(bp)
+        self.slider_bp.setValue(int(np.clip((bp / 0.20) * 2000.0, 0, 2000)))
+
+        self.spin_mtf.setValue(m)
+        self.slider_mtf.setValue(int(np.clip((m / 0.50) * 2000.0, 1, 2000)))
+
+        self.spin_bp.blockSignals(False)
+        self.slider_bp.blockSignals(False)
+        self.spin_mtf.blockSignals(False)
+        self.slider_mtf.blockSignals(False)
 
     def reset_sliders(self):
-        self.slider_bp.setValue(0)
-        self.slider_asinh.setValue(10)
-        self.update_stretch_preview()
+        if self.image_32bit is not None:
+            self.apply_auto_mtf()
+        else:
+            self.sync_controls(0.0, 0.10)
 
     def run_graxpert(self):
         if self.image_32bit is None:
@@ -215,9 +289,9 @@ class DeveloperTab(QWidget):
         )
         if not p: return
 
-        bp_val = self.slider_bp.value() / 1000.0
-        stretch_factor = self.slider_asinh.value() * 0.5
-        processed = manual_stretch(self.image_32bit, black_point=bp_val, stretch_factor=stretch_factor)
+        bp_val = self.spin_bp.value()
+        m_val = self.spin_mtf.value()
+        processed = manual_stretch(self.image_32bit, black_point=bp_val, midtone=m_val)
 
         ext = os.path.splitext(p)[1].lower()
         if ext in ['.jpg', '.jpeg']:
