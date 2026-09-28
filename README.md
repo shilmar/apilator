@@ -59,8 +59,8 @@ apilador_astro/
 * Windows 10 / 11 de 64 bits.
 
 ### 1. Clonar el repositorio
-git clone https://github.com/TU_USUARIO/TU_REPOSITORIO.git
-cd TU_REPOSITORIO
+git clone https://github.com/shilmar/apilator.git
+cd apilator
 
 ### 2. Instalar dependencias
 pip install -r requirements.txt
