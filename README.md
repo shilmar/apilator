@@ -4,6 +4,24 @@ Herramienta de escritorio en Python / PySide6 diseñada para astrofotografía de
 
 ---
 
+## Novedades de esta versión
+
+### 1. Interfaz y Experiencia de Usuario
+- **Arquitectura Modular por Pestañas:** Separación entre el flujo de apilado (*Stacker*) y las herramientas de revelado/postprocesado (*Editor*).
+- **Lienzo Reactivo con Máscara Guiada:** Dibujo y ajuste interactivo de máscara cielo/suelo con redimensionado adaptativo y preservación de aspecto.
+- **Microajuste MTF en Tiempo Real:** Previsualización no destructiva del estirado de histograma para inspección rápida de tomas lineales.
+- **Gestión de Proyectos (`.mwstack`):** Guardado y restauración completa de sesiones (rutas de archivos, parámetros de apilado, máscaras y configuración).
+
+### 2. Motor de Procesado y Alineación
+- **Filtrado Morfológico Top-Hat:** Aislamiento robusto de fuentes estelares sobre gradientes galácticos y fondos lineales oscuros.
+- **Refinamiento Subpíxel Selectivo:** Cálculo de centroides estelares con precisión subpíxel (`cornerSubPix`) sobre pares verificados por RANSAC.
+- **Alineación Proyectiva Consecutiva:** Encadenamiento de homografías entre tomas contiguas para absorber la perspectiva sideral sin derivas geométricas.
+- **Rechazo Kappa-Sigma Asimétrico:** Clipping MAD con tolerancia superior adaptativa para preservar la señal estelar frente a artefactos y satélites.
+- **Streaming en 32-bit Float:** Procesado por bloques horizontales para mantener un consumo de memoria constante en lotes extensos.
+- **Soporte de Calibración:** Generación y sustracción térmica de Master Dark en coma flotante.
+
+---
+
 ## Caracteristicas Principales
 
 ### 1. Modulo Apilador Dual (StackerTab)
