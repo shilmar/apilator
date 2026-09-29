@@ -1,79 +1,81 @@
-# Milky Way Dual Stacker & Astro Studio
+# Apilator
 
-Herramienta de escritorio en Python / PySide6 diseñada para astrofotografía de paisaje nocturno (nightscape). Implementa un flujo de trabajo desacoplado en dos módulos: Apilado Dual Diferencial (cielo y suelo independientes) y Revelador / Postprocesado con integración de GraXpert AI en coma flotante de 32 bits nativos.
-
----
-
-## Novedades de esta versión
-
-### 1. Interfaz y Experiencia de Usuario
-- **Arquitectura Modular por Pestañas:** Separación entre el flujo de apilado (*Stacker*) y las herramientas de revelado/postprocesado (*Editor*).
-- **Lienzo Reactivo con Máscara Guiada:** Dibujo y ajuste interactivo de máscara cielo/suelo con redimensionado adaptativo y preservación de aspecto.
-- **Microajuste MTF en Tiempo Real:** Previsualización no destructiva del estirado de histograma para inspección rápida de tomas lineales.
-- **Gestión de Proyectos (`.mwstack`):** Guardado y restauración completa de sesiones (rutas de archivos, parámetros de apilado, máscaras y configuración).
-
-### 2. Motor de Procesado y Alineación
-- **Filtrado Morfológico Top-Hat:** Aislamiento robusto de fuentes estelares sobre gradientes galácticos y fondos lineales oscuros.
-- **Refinamiento Subpíxel Selectivo:** Cálculo de centroides estelares con precisión subpíxel (`cornerSubPix`) sobre pares verificados por RANSAC.
-- **Alineación Proyectiva Consecutiva:** Encadenamiento de homografías entre tomas contiguas para absorber la perspectiva sideral sin derivas geométricas.
-- **Rechazo Kappa-Sigma Asimétrico:** Clipping MAD con tolerancia superior adaptativa para preservar la señal estelar frente a artefactos y satélites.
-- **Streaming en 32-bit Float:** Procesado por bloques horizontales para mantener un consumo de memoria constante en lotes extensos.
-- **Soporte de Calibración:** Generación y sustracción térmica de Master Dark en coma flotante.
+**Apilator** es una herramienta especializada de posprocesado y apilado para **astrofotografía de paisaje (nightscapes)**. Permite desacoplar el movimiento del cielo respecto al horizonte terrestre, aplicar integración estadística Kappa-Sigma en coma flotante de 32 bits y editar la imagen final en tiempo real con asistencia de redes neuronales (GraXpert y StarNet++ v2).
 
 ---
 
-## Caracteristicas Principales
+## Novedades en la Versión 0.3.1
 
-### 1. Modulo Apilador Dual (StackerTab)
-* Calibracion termica: Generacion por bloques de memoria (chunked streaming) de Master Dark y sustraccion termica lineal.
-* Separacion Cielo / Suelo: Segmentacion interactiva mediante trazos guiados con refinamiento morfologico y algoritmo GrabCut.
-* Alineacion estelar de alta precision:
-  * Deteccion de estrellas mediante filtros Top-Hat morfologicos y descriptores ORB.
-  * Refinamiento subpixel de centroides con cornerSubPix.
-  * Estimacion robusta de matrices de homografia/afines mediante RANSAC con soporte para rotacion de campo.
-* Apilado estadistico con rechazo:
-  * Algoritmo de rechazo Kappa-Sigma basado en MAD (Median Absolute Deviation).
-  * Streaming binario a disco para apilar grandes secuencias sin saturar la memoria RAM.
-  * Modos soportados: Tripode Fijo (cielo alineado + suelo estatico compuesto) y Star Tracker (seguimiento ecuatorial).
-* Gestion de tomas granular: Seleccion interactiva de la toma de referencia (REF) y eliminacion individual de tomas descartadas sin reiniciar la sesion ni la mascara.
-* Persistencia de sesion: Guardado y carga de proyectos (.mwstack / .json) preservando listas de archivos, ajustes y mascaras asociadas.
+* **Integración de StarNet++ v2 CLI**: Separación neuronal de estrellas y fondo nebuloso (*starless*) en espacio lineal nativo (`--linear`) protegiendo siluetas terrestres[cite: 1].
+* **Control interactivo de estrellas**: Deslizador dinámico de intensidad/reducción estelar (0% a 150%) y conmutador visual de capas (*Compuesta*, *Solo Fondo*, *Solo Estrellas*).
+* **Pestaña de Configuración y Ajustes**: Persistencia de rutas externas (`starnet++.exe` / `starnet2.exe`), factor Kappa base y resolución de proxies en `config.json`.
+* **Motor de previsualización a 60 fps**: Pipeline basado en proxies escalados con memoria contigua en C (`np.ascontiguousarray`), eliminando retrasos al interactuar con deslizadores.
+* **Exportación multiformato nativa**: Soporte en cuadro de diálogo para **TIFF de 32 bits Float**, **TIFF de 16 bits** (RGB compatible con Windows/Photoshop) y **JPEG**.
+* **Motor Kappa-Sigma optimizado**: Integración estadística acelerada vectorizada en bloques horizontales de baja huella de RAM.
 
-### 2. Modulo Revelador / Editor (DeveloperTab)
-* Procesamiento en 32 bits: Carga directa de imagenes maestras en formato TIFF lineal de 32 bits (float32) o archivos FITS astronomicos.
-* Correccion de gradientes con GraXpert AI: Extraccion de contaminacion luminica mediante red neuronal con proteccion de la mascara de suelo y guardado automatico con sufijo _graxpert.tiff.
-* Ajustes tonales no destructivos:
-  * Algoritmo Auto-MTF (Midtone Transfer Function).
-  * Estirado hiperbolico Asinh con control en tiempo real de punto negro.
-* Exportacion final: Guardado del revelado en TIFF de 16 bits sin perdida o JPEG de alta calidad para publicacion.
+---
+
+## Características Principales
+
+### 1. Apilador Dual Cielo / Suelo (Stacker)
+* **Detección y alineación estelar**: Extracción morfológica de estrellas (Top-Hat + centroides subpíxel) con registro afín robusto basado en RANSAC.
+* **Separación de horizonte**: Generación de máscaras binarias y desenfoque adaptativo (*feathering*) para aislar el suelo estático del cielo en rotación.
+* **Rechazo Kappa-Sigma vectorizado**: Supresión de trazas de satélites, aviones y ruido térmico/cósmico en buffers de 32 bits (`float32`).
+
+### 2. Revelador y Procesado de Color (Developer)
+* **Eliminación de gradientes por IA (GraXpert)**: Neutralización del fondo astronómico protegiendo el primer plano terrestre.
+* **Separación y reducción de estrellas por IA (StarNet++ v2)**: Extracción en segundo plano con control de opacidad en tiempo real.
+* **Balance de blancos astrofotográfico**: Ajuste directo de Temperatura (Azul/Ámbar) y Tinte (Verde/Magenta) en espacio lineal.
+* **Saturación cromática diferencial**: Controles desacoplados de saturación para el cielo y el suelo mediante máscaras gaussianas.
+* **Curva MTF interactiva**: Algoritmo de función de transferencia de medios tonos automático y manual.
+
+### 3. Configuración y Entorno (Settings)
+* Detección automática y manual de ejecutables CLI externos.
+* Ajustes de rendimiento de memoria, hilos y tamaño del proxy visual.
+
+---
+
+
 
 ---
 
 ## Estructura del Proyecto
 ```text
-apilador_astro/
-├── run_app.py               # Punto de entrada de la aplicacion
-├── requirements.txt         # Dependencias del entorno
+apilator/
+├── config.json              # Configuración persistente del usuario
+├── run_app.py               # Punto de entrada de la aplicación
 ├── core/
-│   ├── __init__.py
-│   ├── project_manager.py   # Gestion de sesiones y serializacion JSON/PNG
-│   ├── stacking.py          # Logica de carga, calibracion, homografia y apilado
-│   ├── masking.py           # Algoritmos de segmentacion y refinado GrabCut
-│   ├── stretch.py           # Funciones de estirado no lineal (Asinh, MTF)
-│   └── graxpert_bridge.py   # Pasarela CLI con GraXpert y soporte FITS/TIFF
+│   ├── config_manager.py    # Carga y almacenamiento de ajustes JSON
+│   ├── graxpert_bridge.py   # Conector CLI con GraXpert AI
+│   ├── starnet_bridge.py    # Conector y parser CLI con StarNet++ v2
+│   ├── stacking.py          # Motor de registro, RANSAC y apilado Kappa-Sigma
+│   └── stretch.py           # Algoritmos MTF, Balance de Blancos y Saturación
 └── gui/
-    ├── __init__.py
-    ├── canvas.py            # Visor grafico interactivo y sistema de trazos
-    ├── tab_stacker.py       # Pestana del Apilador Dual
-    ├── tab_developer.py     # Pestana del Revelador / Editor
-    ├── main_window.py       # Ventana principal contenedora
-    └── worker.py            # Hilos secundarios en segundo plano (QThread)
+    ├── canvas.py            # Visor interactivo QGraphicsView acelerado
+    ├── main_window.py       # Ventana principal y gestión de pestañas
+    ├── tab_developer.py     # Pestaña de revelado y composición de capas
+    ├── tab_settings.py      # Pestaña de configuración de rutas y parámetros
+    ├── tab_stacker.py       # Pestaña de apilado dual cielo/suelo
+    └── worker.py            # Hilos de ejecución en segundo plano (QThread)
 ```
 
 ## Instalacion y Requisitos
+## Requisitos del Sistema
 
-### Requisitos Previos
-* Python 3.10 o superior (recomendado 3.11 / 3.12 / 3.13).
-* Windows 10 / 11 de 64 bits.
+* **Sistema Operativo**: Windows 10/11, Linux o macOS.
+* **Python**: 3.10 o superior.
+* **Dependencias principales**:
+  * `PySide6`
+  * `numpy`
+  * `opencv-python`
+  * `tifffile`
+
+*(Opcional para módulos de IA)*:
+* **GraXpert** (versión CLI o ejecutable en PATH).
+* **StarNet++ v2 CLI** (especificar ruta al ejecutable en la pestaña de Configuración).
+
+---
+
 
 ### 1. Clonar el repositorio
 ```cmd
@@ -101,19 +103,20 @@ Si dispones de una tarjeta grafica NVIDIA, puedes habilitar el procesamiento ace
 Inicia la herramienta ejecutando:
 python run_app.py
 
-1. Pestana 1 (Apilador):
-   * Anade las tomas de luz (Lights) y las tomas oscuras de calibracion (Darks).
-   * Haz doble clic sobre la toma que desees usar como referencia visual y de alineacion.
-   * Traza marcas verdes en el cielo y rojas en el suelo, y pulsa "Refinar Automatica".
-   * Pulsa "INICIAR APILADO DUAL" y elige la ruta de guardado del TIFF maestro de 32 bits.
-   * Al finalizar, el resultado se transferira automaticamente al modulo de revelado.
-
-2. Pestana 2 (Revelador):
-   * Abre un archivo TIFF/FITS existente o trabaja con el resultado recien apilado.
-   * Aplica GraXpert AI para eliminar gradientes de contaminacion luminica.
-   * Ajusta el punto negro y el factor Asinh hasta obtener el contraste y detalle deseados.
-   * Exporta el resultado final en 16 bits o JPG mediante "Exportar Imagen Revelada...".
-
+Flujo de Trabajo Recomendado
+    Apilado:
+        Cargar las tomas en la pestaña 1. Apilador.
+        Definir la máscara de separación cielo/suelo.
+        Ejecutar el apilado dual. Al concluir, el resultado en float32 se transferirá automáticamente a la pestaña de revelado.
+    Corrección de Gradientes:
+        En la pestaña 2. Revelador, pulsar Eliminar Gradientes con GraXpert si hay contaminación lumínica residual.
+    Control de Estrellas:
+        Ejecutar Separar Estrellas con StarNet AI para aislar el campo estelar.
+        Reducir la intensidad al 40%-60% para resaltar las estructuras de la Vía Láctea.
+    Color y Curva:
+        Ajustar balance de blancos, saturación selectiva para el cielo y estirado MTF.
+    Exportación:
+        Guardar en TIFF de 32 bits si se va a continuar la edición en Photoshop o PixInsight, o en TIFF de 16 bits / JPEG para entrega final.
 ---
 
 ## Licencia

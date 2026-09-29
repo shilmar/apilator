@@ -6,7 +6,7 @@ import tifffile
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QGroupBox, QSlider, QSplitter,
-    QDoubleSpinBox, QTextEdit
+    QDoubleSpinBox, QTextEdit, QComboBox, QSpinBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
@@ -17,24 +17,34 @@ from core.stretch import (
     apply_white_balance, adjust_saturation_dual
 )
 from gui.canvas import MaskCanvas
-from gui.worker import GraXpertWorker
+from gui.worker import GraXpertWorker, StarNetWorker
 
 
 class DeveloperTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.image_32bit = None       # Imagen nativa float32 a resolución completa
-        self.preview_proxy = None     # Proxy de previsualización rápida
-        self.proxy_mask = None        # Máscara suavizada adaptada al tamaño del proxy
-        self.current_mask = None      # Máscara original a resolución nativa
+        self.image_32bit = None       # Imagen nativa base (float32)
+        self.image_starless = None    # Capa sin estrellas (float32)
+        self.image_stars = None       # Capa de solo estrellas (float32)
+
+        # Proxies ligeros para refresco interactivo
+        self.preview_proxy = None     
+        self.proxy_starless = None
+        self.proxy_stars = None
+        self.proxy_mask = None        
+
+        self.current_mask = None      
         self.active_filepath = None
         self.gx_worker = None
+        self.sn_worker = None
 
         # Parámetros del revelador
         self.temp_val = 0.0
         self.tint_val = 0.0
         self.sat_sky_val = 1.0
         self.sat_gnd_val = 1.0
+        self.star_intensity = 1.0     # 1.0 = 100%, 0.0 = Starless puro
+        self.view_layer_mode = 0      # 0: Compuesta, 1: Solo Fondo, 2: Solo Estrellas
 
         self._setup_ui()
 
@@ -50,8 +60,8 @@ class DeveloperTab(QWidget):
 
         # 2. Panel lateral de controles
         left_panel = QWidget()
-        left_panel.setMinimumWidth(350)
-        left_panel.setMaximumWidth(410)
+        left_panel.setMinimumWidth(360)
+        left_panel.setMaximumWidth(420)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(6)
@@ -77,6 +87,51 @@ class DeveloperTab(QWidget):
         self.btn_graxpert.clicked.connect(self.run_graxpert)
         gx_layout.addWidget(self.btn_graxpert)
         left_layout.addWidget(grp_graxpert)
+
+        # Módulo StarNet AI (Separación y Reducción de Estrellas)
+        grp_starnet = QGroupBox("StarNet++ AI - Control de Estrellas")
+        sn_layout = QVBoxLayout(grp_starnet)
+        sn_layout.setSpacing(4)
+
+        row_stride = QHBoxLayout()
+        row_stride.addWidget(QLabel("Paso (Stride):"))
+        self.spin_stride = QSpinBox()
+        self.spin_stride.setRange(64, 512)
+        self.spin_stride.setSingleStep(64)
+        self.spin_stride.setValue(256)
+        row_stride.addWidget(self.spin_stride)
+        sn_layout.addLayout(row_stride)
+
+        self.btn_starnet = QPushButton("Separar Estrellas con StarNet AI")
+        self.btn_starnet.setStyleSheet("font-weight: bold; background-color: #434c5e; color: #eceff4; padding: 5px;")
+        self.btn_starnet.clicked.connect(self.run_starnet)
+        sn_layout.addWidget(self.btn_starnet)
+
+        # Modo de visualización de capas
+        row_mode = QHBoxLayout()
+        row_mode.addWidget(QLabel("Capa visible:"))
+        self.combo_layer = QComboBox()
+        self.combo_layer.addItems(["Compuesta (Normal)", "Solo Fondo (Starless)", "Solo Estrellas"])
+        self.combo_layer.setEnabled(False)
+        self.combo_layer.currentIndexChanged.connect(self.on_layer_mode_changed)
+        row_mode.addWidget(self.combo_layer)
+        sn_layout.addLayout(row_mode)
+
+        # Deslizador de intensidad de estrellas
+        row_star_slider = QHBoxLayout()
+        row_star_slider.addWidget(QLabel("Intensidad Estrellas:"))
+        self.lbl_star_intensity = QLabel("100%")
+        row_star_slider.addWidget(self.lbl_star_intensity)
+        sn_layout.addLayout(row_star_slider)
+
+        self.slider_stars = QSlider(Qt.Horizontal)
+        self.slider_stars.setRange(0, 150)
+        self.slider_stars.setValue(100)
+        self.slider_stars.setEnabled(False)
+        self.slider_stars.valueChanged.connect(self.on_star_intensity_changed)
+        sn_layout.addWidget(self.slider_stars)
+
+        left_layout.addWidget(grp_starnet)
 
         # Módulo Balance de Blancos
         grp_wb = QGroupBox("Balance de Blancos")
@@ -196,7 +251,7 @@ class DeveloperTab(QWidget):
 
         # Botón de exportación
         btn_export = QPushButton("Exportar Imagen Revelada...")
-        btn_export.setFixedHeight(40)
+        btn_export.setFixedHeight(38)
         btn_export.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
         btn_export.clicked.connect(self.export_image)
         left_layout.addWidget(btn_export)
@@ -205,7 +260,7 @@ class DeveloperTab(QWidget):
         left_layout.addWidget(QLabel("Registro del Revelador:"))
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setFixedHeight(110)
+        self.txt_log.setFixedHeight(105)
         self.txt_log.setStyleSheet(
             "background-color: #141414; color: #d0d0d0; "
             "font-family: Consolas, monospace; font-size: 11px; "
@@ -224,10 +279,12 @@ class DeveloperTab(QWidget):
         self.txt_log.append(text)
         self.txt_log.moveCursor(QTextCursor.End)
 
-    # --- Generación de proxy para previsualización a 60 fps ---
+    # --- Generación de Proxies para Rendimiento ---
     def _generate_preview_proxy(self):
         if self.image_32bit is None:
             self.preview_proxy = None
+            self.proxy_starless = None
+            self.proxy_stars = None
             self.proxy_mask = None
             return
 
@@ -238,8 +295,16 @@ class DeveloperTab(QWidget):
         if scale < 1.0:
             pw = (int(w * scale) // 4) * 4
             ph = (int(h * scale) // 4) * 4
-            resized = cv2.resize(self.image_32bit, (pw, ph), interpolation=cv2.INTER_AREA)
-            self.preview_proxy = np.ascontiguousarray(resized, dtype=np.float32)
+            self.preview_proxy = np.ascontiguousarray(
+                cv2.resize(self.image_32bit, (pw, ph), interpolation=cv2.INTER_AREA), dtype=np.float32
+            )
+            if self.image_starless is not None:
+                self.proxy_starless = np.ascontiguousarray(
+                    cv2.resize(self.image_starless, (pw, ph), interpolation=cv2.INTER_AREA), dtype=np.float32
+                )
+                self.proxy_stars = np.ascontiguousarray(
+                    cv2.resize(self.image_stars, (pw, ph), interpolation=cv2.INTER_AREA), dtype=np.float32
+                )
 
             if self.current_mask is not None:
                 m_small = cv2.resize(self.current_mask, (pw, ph), interpolation=cv2.INTER_LINEAR)
@@ -251,6 +316,8 @@ class DeveloperTab(QWidget):
                 self.proxy_mask = None
         else:
             self.preview_proxy = np.ascontiguousarray(self.image_32bit, dtype=np.float32)
+            self.proxy_starless = self.image_starless.copy() if self.image_starless is not None else None
+            self.proxy_stars = self.image_stars.copy() if self.image_stars is not None else None
             if self.current_mask is not None:
                 ksize = int(max(15, (min(h, w) // 150) | 1))
                 if ksize % 2 == 0: ksize += 1
@@ -262,12 +329,16 @@ class DeveloperTab(QWidget):
     def load_image_direct(self, filepath: str, mask: np.ndarray = None):
         self.active_filepath = filepath
         self.current_mask = mask
+        self.image_starless = None
+        self.image_stars = None
+        self.combo_layer.setEnabled(False)
+        self.slider_stars.setEnabled(False)
         self.log_message(f"Cargando imagen: {os.path.basename(filepath)}...")
         try:
             self.image_32bit = load_image_as_float32(filepath)
             self._generate_preview_proxy()
             self.apply_auto_mtf()
-            self.log_message(f"Imagen en memoria ({self.image_32bit.shape[1]}x{self.image_32bit.shape[0]} px). Vista acelerada activa.")
+            self.log_message(f"Imagen lista ({self.image_32bit.shape[1]}x{self.image_32bit.shape[0]} px). Vista acelerada activa.")
         except Exception as e:
             self.log_message(f"[ERROR] No se pudo cargar: {e}")
             QMessageBox.critical(self, "Error", f"Fallo al abrir archivo:\n{e}")
@@ -280,7 +351,35 @@ class DeveloperTab(QWidget):
         if p:
             self.load_image_direct(p)
 
-    # --- Pipeline compartido ---
+    # --- Composición Dinámica de Capas ---
+    def _compose_active_base(self, for_export: bool = False) -> np.ndarray:
+        """Mezcla las capas Starless y Estrellas según el modo y slider."""
+        if for_export:
+            starless, stars, base = self.image_starless, self.image_stars, self.image_32bit
+        else:
+            starless, stars, base = self.proxy_starless, self.proxy_stars, self.preview_proxy
+
+        if base is None:
+            return None
+
+        # Si aún no se ha separado con StarNet, devolver la imagen base intacta
+        if starless is None or stars is None:
+            return base
+
+        # 0: Compuesta con slider de opacidad de estrellas
+        if self.view_layer_mode == 0:
+            if self.star_intensity == 1.0:
+                return base
+            composed = starless + (stars * self.star_intensity)
+            return np.clip(composed, 0.0, 1.0)
+        # 1: Solo Fondo (Starless)
+        elif self.view_layer_mode == 1:
+            return starless
+        # 2: Solo Estrellas
+        else:
+            return stars
+
+    # --- Cadena de Revelado Compartida ---
     def _apply_pipeline_on_image(self, target_img: np.ndarray, precomputed_mask: np.ndarray = None) -> np.ndarray:
         if target_img is None:
             return None
@@ -311,19 +410,69 @@ class DeveloperTab(QWidget):
         stretched = manual_stretch(img, black_point=bp_val, midtone=m_val)
         return np.ascontiguousarray(stretched, dtype=np.float32)
 
-    def _apply_full_pipeline(self) -> np.ndarray:
-        target = self.preview_proxy if self.preview_proxy is not None else self.image_32bit
-        return self._apply_pipeline_on_image(target, precomputed_mask=self.proxy_mask)
-
     def update_stretch_preview(self):
-        target = self.preview_proxy if self.preview_proxy is not None else self.image_32bit
-        if target is None:
+        base_to_render = self._compose_active_base(for_export=False)
+        if base_to_render is None:
             return
-        stretched = self._apply_full_pipeline()
-        if stretched is not None:
-            self.canvas.load_image(target, display_stretched=stretched)
+        
+        # Si se visualizan solo las estrellas, no aplicar corte de máscara ni balance forzado de suelo
+        if self.view_layer_mode == 2: # Solo Estrellas
+            stretched = manual_stretch(base_to_render, black_point=self.spin_bp.value(), midtone=self.spin_mtf.value())
+        else:
+            stretched = self._apply_pipeline_on_image(base_to_render, precomputed_mask=self.proxy_mask)
 
-    # --- Callbacks de Sliders ---
+        if stretched is not None:
+            self.canvas.load_image(base_to_render, display_stretched=stretched)
+
+    # --- Callbacks StarNet ---
+    def run_starnet(self):
+        if self.image_32bit is None:
+            QMessageBox.warning(self, "Aviso", "Carga o apila una imagen primero.")
+            return
+
+        self.btn_starnet.setEnabled(False)
+        self.log_message("=== INICIANDO SEPARACIÓN STARNET++ AI ===")
+        stride = self.spin_stride.value()
+
+        self.sn_worker = StarNetWorker(
+            self.image_32bit, 
+            sky_mask=self.current_mask, 
+            stride=stride
+        )
+        self.sn_worker.status_changed.connect(self.log_message)
+        self.sn_worker.finished_success.connect(self.on_starnet_success)
+        self.sn_worker.error_occurred.connect(self.on_starnet_error)
+        self.sn_worker.start()
+
+    def on_starnet_success(self, starless_img: np.ndarray, stars_img: np.ndarray):
+        self.btn_starnet.setEnabled(True)
+        self.image_starless = np.ascontiguousarray(starless_img, dtype=np.float32)
+        self.image_stars = np.ascontiguousarray(stars_img, dtype=np.float32)
+
+        # Habilitar controles de capa
+        self.combo_layer.setEnabled(True)
+        self.slider_stars.setEnabled(True)
+
+        self._generate_preview_proxy()
+        self.update_stretch_preview()
+        self.log_message("[STARNET] Estrellas separadas con éxito. Capas activadas.")
+
+    def on_starnet_error(self, err_msg: str):
+        self.btn_starnet.setEnabled(True)
+        self.log_message(f"[ERROR STARNET] {err_msg}")
+        QMessageBox.warning(self, "Error en StarNet++", err_msg)
+
+    def on_layer_mode_changed(self, idx: int):
+        self.view_layer_mode = idx
+        self.slider_stars.setEnabled(idx == 0)
+        self.update_stretch_preview()
+
+    def on_star_intensity_changed(self, val: int):
+        self.star_intensity = val / 100.0
+        self.lbl_star_intensity.setText(f"{val}%")
+        self.update_stretch_preview()
+
+    # --- Callbacks Tono y Balance ---
     def on_temp_changed(self, val: int):
         self.temp_val = val / 100.0
         self.lbl_temp_val.setText(f"{self.temp_val:+.2f}")
@@ -450,6 +599,11 @@ class DeveloperTab(QWidget):
     def on_graxpert_success(self, corrected_img: np.ndarray):
         self.btn_graxpert.setEnabled(True)
         self.image_32bit = np.ascontiguousarray(corrected_img, dtype=np.float32)
+        # Si se neutralizó fondo, resetear capas desacopladas anteriores
+        self.image_starless = None
+        self.image_stars = None
+        self.combo_layer.setEnabled(False)
+        self.slider_stars.setEnabled(False)
         self._generate_preview_proxy()
         self.update_stretch_preview()
         self.log_message("[GRAXPERT] Fondo neutralizado y aplicado.")
@@ -459,12 +613,11 @@ class DeveloperTab(QWidget):
         self.log_message(f"[ERROR GRAXPERT] {err_msg}")
         QMessageBox.warning(self, "Error en GraXpert", err_msg)
 
-    # --- Exportación única y en resolución completa ---
+    # --- Exportación Multiformato en Resolución Completa ---
     def export_image(self):
         if self.image_32bit is None:
             return
 
-        # Filtros con opciones de 32 bits, 16 bits y JPEG
         filtros = (
             "TIFF 32-bit Float (*.tif *.tiff);;"
             "TIFF 16-bit (*.tif *.tiff);;"
@@ -480,7 +633,10 @@ class DeveloperTab(QWidget):
         h_full, w_full = self.image_32bit.shape[:2]
         self.log_message(f"Exportando imagen completa ({w_full}x{h_full} px)...")
 
-        # 1. Preparar la máscara nativa para la imagen completa si hay saturación diferencial
+        # 1. Componer la base completa según capas activas
+        full_base = self._compose_active_base(for_export=True)
+
+        # 2. Máscara de saturación diferencial nativa
         full_mask = None
         if self.current_mask is not None and (self.sat_sky_val != self.sat_gnd_val):
             if self.current_mask.shape[:2] != (h_full, w_full):
@@ -488,33 +644,30 @@ class DeveloperTab(QWidget):
             else:
                 m_full = self.current_mask
             ksize = int(max(15, (min(h_full, w_full) // 150) | 1))
-            if ksize % 2 == 0:
-                ksize += 1
+            if ksize % 2 == 0: ksize += 1
             sm = cv2.GaussianBlur(m_full, (ksize, ksize), sigmaX=ksize / 3.0)
             full_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
 
-        # 2. Aplicar la cadena de revelado sobre self.image_32bit a tamaño nativo
-        processed = self._apply_pipeline_on_image(self.image_32bit, precomputed_mask=full_mask)
+        # 3. Aplicar cadena completa sobre la composición
+        processed = self._apply_pipeline_on_image(full_base, precomputed_mask=full_mask)
 
-        # 3. Guardar según el formato/profundidad elegida
+        # 4. Guardar archivo
         ext = os.path.splitext(p)[1].lower()
         if ext in ['.jpg', '.jpeg']:
             bgr8 = cv2.cvtColor((processed * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
             cv2.imwrite(p, bgr8, [cv2.IMWRITE_JPEG_QUALITY, 96])
-            desc_formato = "JPEG 8-bit"
+            desc = "JPEG 8-bit"
         elif "32-bit" in selected_filter:
-            # TIFF float32 nativo estándar con compresión zlib sin pérdidas
             out32 = np.clip(processed, 0.0, 1.0).astype(np.float32)
             tifffile.imwrite(p, out32, compression='zlib', photometric='rgb')
-            desc_formato = "TIFF 32-bit float"
+            desc = "TIFF 32-bit float"
         else:
-            # TIFF uint16 clásico compatible con todos los visores
             u16 = (np.clip(processed, 0.0, 1.0) * 65535.0).astype(np.uint16)
             tifffile.imwrite(p, u16, compression='zlib', photometric='rgb')
-            desc_formato = "TIFF 16-bit"
+            desc = "TIFF 16-bit"
 
-        self.log_message(f"Imagen guardada en: {os.path.basename(p)} ({desc_formato})")
+        self.log_message(f"Imagen guardada en: {os.path.basename(p)} ({desc})")
         QMessageBox.information(
             self, "Exportación", 
-            f"Guardada con éxito en resolución completa:\n{p}\n\nFormato: {desc_formato} ({w_full}x{h_full} px)"
+            f"Guardada con éxito en resolución completa:\n{p}\n\nFormato: {desc} ({w_full}x{h_full} px)"
         )

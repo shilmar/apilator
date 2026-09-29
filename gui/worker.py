@@ -18,6 +18,7 @@ from core.stacking import (
     HAS_GPU
 )
 from core.graxpert_bridge import run_graxpert_background_extraction
+from core.starnet_bridge import run_starnet
 
 def save_frame_float32(filepath: str, img_float32: np.ndarray):
     raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
@@ -231,3 +232,28 @@ class GraXpertWorker(QThread):
             self.finished_success.emit(corrected)
         except Exception as e:
             self.error_occurred.emit(str(e))
+            
+class StarNetWorker(QThread):
+    status_changed = Signal(str)
+    finished_success = Signal(object, object)  # (starless_img, stars_img)
+    error_occurred = Signal(str)
+
+    def __init__(self, img_rgb: np.ndarray, sky_mask: np.ndarray = None, stride: int = 256, custom_exe: str = None):
+        super().__init__()
+        self.img_rgb = img_rgb
+        self.sky_mask = sky_mask
+        self.stride = stride
+        self.custom_exe = custom_exe
+
+    def run(self):
+        try:
+            starless, stars = run_starnet(
+                self.img_rgb,
+                sky_mask=self.sky_mask,
+                stride=self.stride,
+                starnet_exe=self.custom_exe,
+                log_callback=self.status_changed.emit
+            )
+            self.finished_success.emit(starless, stars)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
