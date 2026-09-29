@@ -46,7 +46,7 @@ class StackingWorker(QThread):
             darks = self.config.get("darks", [])
             sky_mask = self.config.get("mask", None)
             mode = self.config.get("mode", "fixed_tripod")
-            kappa = self.config.get("kappa", 1.8)
+            kappa = float(self.config.get("kappa", 2.2))
             output_path = self.config.get("output_path", "resultado_dual_32bit.tiff")
 
             if len(lights) < 2:
@@ -85,15 +85,17 @@ class StackingWorker(QThread):
             save_frame_float32(p_sky_0, ref_img)
             sky_temp_files.append(p_sky_0)
 
-            p_gnd_0 = os.path.join(temp_dir, "gnd_0.bin")
-            save_frame_float32(p_gnd_0, ref_img)
-            ground_temp_files.append(p_gnd_0)
+            if mode == "fixed_tripod":
+                p_gnd_0 = os.path.join(temp_dir, "gnd_0.bin")
+                save_frame_float32(p_gnd_0, ref_img)
+                ground_temp_files.append(p_gnd_0)
 
             del ref_img
             gc.collect()
 
             accumulated_H = np.eye(3, dtype=np.float64)
             total_lights = len(lights)
+            discarded_count = 0
 
             for idx, path in enumerate(lights[1:], start=2):
                 if self._is_cancelled:
@@ -106,10 +108,6 @@ class StackingWorker(QThread):
 
                 img = load_image_as_float32(path)
                 img = calibrate_light(img, master_dark)
-
-                p_gnd = os.path.join(temp_dir, f"gnd_{idx-1}.bin")
-                save_frame_float32(p_gnd, img)
-                ground_temp_files.append(p_gnd)
 
                 try:
                     step_H, inliers, curr_kp, curr_desc, curr_gray = register_consecutive_homography(
@@ -128,6 +126,12 @@ class StackingWorker(QThread):
                     save_frame_float32(p_sky, warped)
                     sky_temp_files.append(p_sky)
 
+                    # Guardar suelo solo si la toma es válida
+                    if mode == "fixed_tripod":
+                        p_gnd = os.path.join(temp_dir, f"gnd_{idx-1}.bin")
+                        save_frame_float32(p_gnd, img)
+                        ground_temp_files.append(p_gnd)
+
                     total_dx = accumulated_H[0, 2]
                     total_dy = accumulated_H[1, 2]
                     self.status_changed.emit(
@@ -140,7 +144,11 @@ class StackingWorker(QThread):
                     del warped
 
                 except Exception as e:
-                    self.status_changed.emit(f"[{idx}/{total_lights}] {filename} -> [FALLO ALINEAR]: {e}")
+                    discarded_count += 1
+                    self.status_changed.emit(
+                        f"[DESCARTADA] [{idx}/{total_lights}] {filename} -> Motivo: {e}"
+                    )
+                    # Intentar re-anclar keypoints para no perder el hilo si la siguiente toma es buena
                     try:
                         kps_fail, desc_fail, _ = detect_sky_stars(img, sky_mask=sky_mask)
                         if desc_fail is not None and len(kps_fail) >= 20:
@@ -153,19 +161,22 @@ class StackingWorker(QThread):
                 del img
                 gc.collect()
 
+            if discarded_count > 0:
+                self.status_changed.emit(f"-> Resumen: {discarded_count} toma(s) descartada(s) por problemas de alineación.")
+
             if len(sky_temp_files) < 2:
                 raise RuntimeError("No se pudieron alinear suficientes tomas estelares consecutivas.")
 
             backend_label = "GPU CUDA (NVIDIA)" if HAS_GPU else "CPU Multi-Core"
 
             if self._is_cancelled: return
-            self.status_changed.emit(f"Apilando Cielo ({len(sky_temp_files)} tomas) con [{backend_label}]...")
+            self.status_changed.emit(f"Apilando Cielo ({len(sky_temp_files)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
             self.progress_changed.emit(55)
             sky_stacked = stream_stack_auto(sky_temp_files, (h, w, c), chunk_rows=800, kappa=kappa)
 
             if sky_mask is not None and mode == "fixed_tripod":
                 if self._is_cancelled: return
-                self.status_changed.emit(f"Apilando Suelo ({len(ground_temp_files)} tomas) con [{backend_label}]...")
+                self.status_changed.emit(f"Apilando Suelo ({len(ground_temp_files)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
                 self.progress_changed.emit(75)
                 ground_stacked = stream_stack_auto(ground_temp_files, (h, w, c), chunk_rows=800, kappa=kappa)
 

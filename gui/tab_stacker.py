@@ -141,15 +141,6 @@ class StackerTab(QWidget):
         self.combo_mode.addItems(["Trípode Fijo (Suelo Estático)", "Star Tracker (Seguimiento)"])
         set_layout.addWidget(self.combo_mode)
 
-        # En _setup_ui de gui/tab_stacker.py:
-        self.chk_reduce_distortion = QCheckBox("Reducir distorsión de lente (Gran Angular)")
-        self.chk_reduce_distortion.setChecked(True)
-        self.chk_reduce_distortion.setToolTip(
-            "Modela la curvatura no lineal en las esquinas mediante deformación local adaptativa (TPS).\n"
-            "Recomendado para objetivos entre 12 mm y 28 mm."
-        )
-        set_layout.addWidget(self.chk_reduce_distortion)
-
         set_layout.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
         self.spin_kappa = QDoubleSpinBox()
         self.spin_kappa.setRange(0.5, 5.0)
@@ -486,7 +477,6 @@ class StackerTab(QWidget):
             "mask": self.computed_mask,
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
             "kappa": self.spin_kappa.value(),
-            "reduce_distortion": self.chk_reduce_distortion.isChecked(),
             "output_path": out_path
         }
 

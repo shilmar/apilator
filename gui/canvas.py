@@ -75,8 +75,9 @@ class MaskCanvas(QWidget):
         else:
             display = (np.clip(display_stretched, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-        display_contiguous = np.ascontiguousarray(display)
-        qimg = QImage(display_contiguous.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        display_contiguous = np.ascontiguousarray(display, dtype=np.uint8)
+        bytes_per_line = 3 * w
+        qimg = QImage(display_contiguous.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
 
         self.base_pixmap = QPixmap.fromImage(qimg)
         if self.enable_masking:

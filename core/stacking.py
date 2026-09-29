@@ -46,6 +46,9 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
         data = tifffile.imread(filepath).astype(np.float32)
         if data.ndim == 2:
             data = np.stack([data] * 3, axis=-1)
+        # Si ya es float en rango 0.0 - 1.0, no escalar
+        if data.max() <= 1.05 and data.min() >= 0.0:
+            return np.clip(data, 0.0, 1.0)
         max_val = 65535.0 if data.max() > 255.0 else 255.0
         return np.clip(data / max_val, 0.0, 1.0)
 
@@ -178,38 +181,44 @@ def _process_single_chunk(args):
     offset = y_start * bytes_per_row
 
     n_frames = len(file_paths)
-    block_frames = []
+    # Asignar un array continuo directamente para evitar stacks repetidos en RAM
+    sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
 
-    for f in file_paths:
+    for i, f in enumerate(file_paths):
         with open(f, "rb") as fp:
             fp.seek(offset)
             raw_bytes = fp.read(current_read_bytes)
-            frame_chunk = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
-            block_frames.append(frame_chunk)
+            sub_stack[i] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
 
-    sub_stack = np.stack(block_frames, axis=0)
-    del block_frames
-
-    chunk_result = np.zeros((actual_rows, w, c), dtype=np.float32)
+    chunk_result = np.empty((actual_rows, w, c), dtype=np.float32)
+    upper_tol = kappa + 0.8
 
     for ch in range(c):
+        # Aplanar espacialmente el bloque para aprovechar la vectorización en C de NumPy
         channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
+        
+        # Mediana rápida
         med = np.median(channel_data, axis=0)
+        
+        # MAD y Sigma
         abs_diff = np.abs(channel_data - med)
         mad = np.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
         low = med - 2.5 * sigma
-        high = med + (kappa + 0.8) * sigma
+        high = med + upper_tol * sigma
+
         valid = (channel_data >= low) & (channel_data <= high)
-
-        filtered = np.where(valid, channel_data, np.nan)
-        with np.errstate(all='ignore'):
-            res = np.nanmean(filtered, axis=0)
-
-        nan_mask = np.isnan(res)
-        if np.any(nan_mask):
-            res[nan_mask] = med[nan_mask]
+        
+        # Conteo de píxeles válidos para cálculo directo sin generar arrays auxiliares de NaNs
+        counts = np.sum(valid, axis=0)
+        sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
+        
+        # Donde no queden muestras válidas tras el rechazo, aplicar la mediana como fallback
+        fallback = counts == 0
+        counts[fallback] = 1
+        res = sums / counts
+        res[fallback] = med[fallback]
 
         chunk_result[:, :, ch] = res.reshape((actual_rows, w))
 
@@ -217,7 +226,7 @@ def _process_single_chunk(args):
     return y_start, y_end, chunk_result
 
 
-def parallel_stream_stack(file_paths: list, shape: tuple, chunk_rows: int = 800, kappa: float = 1.8, max_workers: int = None) -> np.ndarray:
+def parallel_stream_stack(file_paths: list, shape: tuple, chunk_rows: int = 1200, kappa: float = 2.2, max_workers: int = None) -> np.ndarray:
     h, w, c = shape
     stacked_out = np.zeros((h, w, c), dtype=np.float32)
 
@@ -269,7 +278,7 @@ def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float) -> np.ndarray:
     return chunk_result
 
 
-def stream_stack_auto(file_paths: list, shape: tuple, chunk_rows: int = 1000, kappa: float = 1.8) -> np.ndarray:
+def stream_stack_auto(file_paths: list, shape: tuple, chunk_rows: int = 1000, kappa: float = 2.2) -> np.ndarray:
     h, w, c = shape
 
     if HAS_GPU:
