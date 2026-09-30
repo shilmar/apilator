@@ -46,7 +46,6 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
         data = tifffile.imread(filepath).astype(np.float32)
         if data.ndim == 2:
             data = np.stack([data] * 3, axis=-1)
-        # Si ya es float en rango 0.0 - 1.0, no escalar
         if data.max() <= 1.05 and data.min() >= 0.0:
             return np.clip(data, 0.0, 1.0)
         max_val = 65535.0 if data.max() > 255.0 else 255.0

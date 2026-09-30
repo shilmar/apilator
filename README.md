@@ -4,34 +4,34 @@
 
 ---
 
-## Novedades en la Versión 0.3.1
+## Novedades de la Versión 0.3.2
 
-* **Integración de StarNet++ v2 CLI**: Separación neuronal de estrellas y fondo nebuloso (*starless*) en espacio lineal nativo (`--linear`) protegiendo siluetas terrestres[cite: 1].
-* **Control interactivo de estrellas**: Deslizador dinámico de intensidad/reducción estelar (0% a 150%) y conmutador visual de capas (*Compuesta*, *Solo Fondo*, *Solo Estrellas*).
-* **Pestaña de Configuración y Ajustes**: Persistencia de rutas externas (`starnet++.exe` / `starnet2.exe`), factor Kappa base y resolución de proxies en `config.json`.
-* **Motor de previsualización a 60 fps**: Pipeline basado en proxies escalados con memoria contigua en C (`np.ascontiguousarray`), eliminando retrasos al interactuar con deslizadores.
-* **Exportación multiformato nativa**: Soporte en cuadro de diálogo para **TIFF de 32 bits Float**, **TIFF de 16 bits** (RGB compatible con Windows/Photoshop) y **JPEG**.
-* **Motor Kappa-Sigma optimizado**: Integración estadística acelerada vectorizada en bloques horizontales de baja huella de RAM.
+- **Alineación Robusta de Referencia Fija:** Registro estelar directo contra el fotograma base mediante homografía subpíxel RANSAC, eliminando la acumulación de deriva en el cielo.
+- **Protección Térmica del Suelo:** Desacoplo de la sustracción de *Master Dark* en la máscara terrestre para evitar el empastado de sombras, junto con un suavizado gaussiano de frontera para transiciones naturales en el horizonte.
+- **Editor de Curvas con Histograma Logarítmico:** Sustitución de controles fijos por un widget interactivo de curvas tonales con evaluación acelerada por LUT (Look-Up Table) y visualización en tiempo real del fondo de cielo.
+- **Compatibilidad con Archivos RAW:** Soporte directo para formatos RAW (`.NEF`, `.CR2`, `.CR3`, `.ARW`, `.DNG`) tanto en el apilador como en el panel de revelado.
+- **Limpieza de Arquitectura:** Eliminación de controles deprecados y desacoplo de eventos de refresco en la interfaz.
 
 ---
 
 ## Características Principales
 
-### 1. Apilador Dual Cielo / Suelo (Stacker)
-* **Detección y alineación estelar**: Extracción morfológica de estrellas (Top-Hat + centroides subpíxel) con registro afín robusto basado en RANSAC.
-* **Separación de horizonte**: Generación de máscaras binarias y desenfoque adaptativo (*feathering*) para aislar el suelo estático del cielo en rotación.
-* **Rechazo Kappa-Sigma vectorizado**: Supresión de trazas de satélites, aviones y ruido térmico/cósmico en buffers de 32 bits (`float32`).
+### 1. Motor de Apilado Dual (Stacker)
+- **Modo Trípode Fijo:** Separación de componentes de cielo y suelo mediante máscaras manuales o refinadas.
+- **Alineación Subpíxel:** Detección de estrellas con ORB y refinamiento por `cornerSubPix`.
+- **Integración Estadística:** Algoritmo Sigma-Clipping adaptativo basado en MAD (*Median Absolute Deviation*) con aceleración por GPU (CUDA / CuPy) o procesamiento multicore en CPU.
+- **Gestión de Calibración:** Generación y aplicación de *Master Dark* para supresión de ruido térmico.
 
-### 2. Revelador y Procesado de Color (Developer)
-* **Eliminación de gradientes por IA (GraXpert)**: Neutralización del fondo astronómico protegiendo el primer plano terrestre.
-* **Separación y reducción de estrellas por IA (StarNet++ v2)**: Extracción en segundo plano con control de opacidad en tiempo real.
-* **Balance de blancos astrofotográfico**: Ajuste directo de Temperatura (Azul/Ámbar) y Tinte (Verde/Magenta) en espacio lineal.
-* **Saturación cromática diferencial**: Controles desacoplados de saturación para el cielo y el suelo mediante máscaras gaussianas.
-* **Curva MTF interactiva**: Algoritmo de función de transferencia de medios tonos automático y manual.
+### 2. Panel de Revelado (Developer)
+- **Control de Estrellas con StarNet++ AI:** Separación en capas independientes de fondo (*starless*) y estrellas en espacio lineal.
+- **Reducción de Gradientes con GraXpert AI:** Extracción y neutralización del fondo atmosférico y contaminación lumínica.
+- **Reducción de Ruido Multimodelo:** Filtros Bilateral, Guided Filter y Non-Local Means específicos para la capa de cielo.
+- **Flujo de Revelado Perceptual:** Balance de blancos fino, saturación diferencial (cielo/suelo), intensidad (*vibrance*), estirado MTF analítico y contraste sigmoidal con preservación del fondo.
+- **Visualizador Interactivo:** Arquitectura basada en buffers proxy para previsualización fluida a 60 FPS.
 
 ### 3. Configuración y Entorno (Settings)
-* Detección automática y manual de ejecutables CLI externos.
-* Ajustes de rendimiento de memoria, hilos y tamaño del proxy visual.
+- ** Detección automática y manual de ejecutables CLI externos.
+- ** Ajustes de rendimiento de memoria, hilos y tamaño del proxy visual.
 
 ---
 
@@ -62,17 +62,17 @@ apilator/
 ## Instalacion y Requisitos
 ## Requisitos del Sistema
 
-* **Sistema Operativo**: Windows 10/11, Linux o macOS.
-* **Python**: 3.10 o superior.
-* **Dependencias principales**:
-  * `PySide6`
-  * `numpy`
-  * `opencv-python`
-  * `tifffile`
-
-*(Opcional para módulos de IA)*:
-* **GraXpert** (versión CLI o ejecutable en PATH).
-* **StarNet++ v2 CLI** (especificar ruta al ejecutable en la pestaña de Configuración).
+- **Python:** 3.10 o superior.
+- **Dependencias Principales:**
+  - `PySide6` (interfaz gráfica basada en Qt)
+  - `numpy`, `scipy` (cálculo numérico y splines)
+  - `opencv-python` (visión por computador y transformaciones geométricas)
+  - `rawpy` (decodificación de archivos RAW de cámara)
+  - `tifffile` (lectura y escritura de imágenes TIFF de alta profundidad)
+  - `astropy` (gestión de archivos FITS astronómicos)
+  - *(Opcional)* `cupy` (aceleración por GPU NVIDIA CUDA)
+- **Binarios Externos:**
+  - Ejecutables de StarNet++ CLI y GraXpert configurados en el entorno.
 
 ---
 
@@ -104,19 +104,18 @@ Inicia la herramienta ejecutando:
 python run_app.py
 
 Flujo de Trabajo Recomendado
-    Apilado:
-        Cargar las tomas en la pestaña 1. Apilador.
-        Definir la máscara de separación cielo/suelo.
-        Ejecutar el apilado dual. Al concluir, el resultado en float32 se transferirá automáticamente a la pestaña de revelado.
-    Corrección de Gradientes:
-        En la pestaña 2. Revelador, pulsar Eliminar Gradientes con GraXpert si hay contaminación lumínica residual.
-    Control de Estrellas:
-        Ejecutar Separar Estrellas con StarNet AI para aislar el campo estelar.
-        Reducir la intensidad al 40%-60% para resaltar las estructuras de la Vía Láctea.
-    Color y Curva:
-        Ajustar balance de blancos, saturación selectiva para el cielo y estirado MTF.
-    Exportación:
-        Guardar en TIFF de 32 bits si se va a continuar la edición en Photoshop o PixInsight, o en TIFF de 16 bits / JPEG para entrega final.
+
+    Pestaña 1 - Apilador:
+        Carga las tomas de luz (Lights) y las tomas oscuras (Darks).
+        Dibuja la máscara para delimitar el cielo y el suelo si estás trabajando en modo trípode fijo.
+        Ejecuta Iniciar Apilado Dual. El resultado se enviará automáticamente al revelador.
+
+    Pestaña 2 - Revelador:
+        Ajusta el estirado inicial mediante el Auto-Estirado MTF.
+        Ejecuta GraXpert AI para eliminar viñeteo o gradientes lumínicos.
+        Ejecuta StarNet++ AI si deseas modular o reducir el tamaño de las estrellas de forma independiente al fondo.
+        Modela los contrastes y las estructuras de nebulosidad usando el Editor de Curvas.
+        Exporta el resultado final en TIFF (16 o 32 bits) o JPEG.
 ---
 
 ## Licencia
