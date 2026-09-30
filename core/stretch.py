@@ -50,17 +50,12 @@ def adjust_saturation_dual(
     return np.clip(blended, 0.0, 1.0)
 
 def calculate_mtf_params(img_float: np.ndarray, target_background: float = 0.20):
-    """
-    Calcula el punto negro estadístico y el punto de medios tonos 'm' de la curva MTF.
-    """
     sample = img_float[::4, ::4]
     med = float(np.median(sample))
     mad = float(np.median(np.abs(sample - med)))
     
-    # Punto negro sugerido: justo bajo el ruido de fondo
     bp = float(np.clip(med - 1.5 * mad, 0.0, 0.95))
     
-    # Estimación analítica del parámetro 'm' de MTF para llevar el fondo a target_background
     norm_med = max(1e-6, (med - bp) / max(1e-6, 1.0 - bp))
     denom = norm_med * (2.0 * target_background - 1.0) - target_background
     if abs(denom) < 1e-7:
@@ -68,7 +63,8 @@ def calculate_mtf_params(img_float: np.ndarray, target_background: float = 0.20)
     else:
         m = (norm_med * (target_background - 1.0)) / denom
     
-    m = float(np.clip(m, 0.0001, 0.9999))
+    # Límite mínimo para evitar sobreexposición destructiva en presencia de cúpulas de luz
+    m = float(np.clip(m, 0.0050, 0.9999))
     return bp, m
 
 def mtf_curve(x: np.ndarray, m: float) -> np.ndarray:
@@ -316,3 +312,188 @@ def apply_curve_lut(img_rgb: np.ndarray, lut: np.ndarray) -> np.ndarray:
 
     mapped_u8 = cv2.LUT(u8, lut_u8)
     return (mapped_u8.astype(np.float32) / 255.0)
+    
+def apply_light_pollution_gradient(
+    img_rgb: np.ndarray, 
+    strength: float = 0.0, 
+    height_ratio: float = 0.50,
+    sky_mask: np.ndarray = None
+) -> np.ndarray:
+    """
+    Atenúa la cúpula de luz en el horizonte modulando la luminancia de forma neutra.
+    strength: 0.0 (desactivado) a 1.0 (máxima atenuación).
+    """
+    if strength <= 1e-4:
+        return img_rgb
+
+    h, w = img_rgb.shape[:2]
+    
+    # 1. Perfil vertical normalizado a 1D
+    y_coords = np.linspace(0.0, 1.0, h, dtype=np.float32)
+    
+    # 0 arriba, 1 en la base del horizonte
+    grad_y = np.clip((y_coords - (1.0 - height_ratio)) / max(1e-4, height_ratio), 0.0, 1.0)
+    
+    # Curva suave coseno (sin saltos bruscos)
+    curve_1d = 0.5 * (1.0 - np.cos(np.pi * grad_y)) * (strength * 0.70)
+    
+    # 2. Expandir explícitamente a toda la cuadrícula (h, w)
+    weight_2d = np.tile(curve_1d[:, np.newaxis], (1, w))
+
+    # 3. Aplicar máscara si existe
+    if sky_mask is not None:
+        m = np.squeeze(sky_mask).astype(np.float32)
+        if m.shape != (h, w):
+            m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+        weight_2d = weight_2d * m
+
+    # 4. Pasar a 3 canales (h, w, 3)
+    weight_3d = np.repeat(weight_2d[..., np.newaxis], 3, axis=2)
+
+    # 5. Atenuación multiplicativa neutra sobre los 3 canales por igual
+    attenuated = img_rgb * (1.0 - weight_3d)
+    return np.clip(attenuated, 0.0, 1.0).astype(np.float32)
+    
+def extract_background_polynomial(
+    img_rgb: np.ndarray, 
+    sky_mask: np.ndarray = None, 
+    degree: int = 2
+) -> np.ndarray:
+    """
+    Modela el fondo del cielo mediante una superficie polinómica 2D (grado 1 o 2).
+    Al ajustarse solo con píxeles puros de cielo, es 100% inmune a siluetas de árboles y suelo.
+    """
+    h, w, c = img_rgb.shape
+    
+    # Reducir resolución para estimación ultrarrápida y resistente a estrellas
+    scale = max(1, min(h, w) // 300)
+    small_h, small_w = h // scale, w // scale
+    
+    small_img = cv2.resize(img_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    
+    if sky_mask is not None:
+        m = np.squeeze(sky_mask).astype(np.float32)
+        if m.shape != (small_h, small_w):
+            small_mask = cv2.resize(m, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            small_mask = m
+        # Retirar borde del suelo para muestreo puro
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        valid_sky = (cv2.erode((small_mask > 0.5).astype(np.uint8), k) > 0)
+    else:
+        valid_sky = np.ones((small_h, small_w), dtype=bool)
+
+    # Coordenadas normalizadas [-1, 1]
+    y, x = np.mgrid[:small_h, :small_w]
+    x_norm = (x / (small_w - 1.0)) * 2.0 - 1.0
+    y_norm = (y / (small_h - 1.0)) * 2.0 - 1.0
+
+    # Términos del polinomio cuadrático: 1, x, y, x^2, y^2, x*y
+    if degree == 1:
+        A = np.column_stack([np.ones(x_norm.size), x_norm.ravel(), y_norm.ravel()])
+    else:
+        A = np.column_stack([
+            np.ones(x_norm.size), 
+            x_norm.ravel(), y_norm.ravel(),
+            (x_norm**2).ravel(), (y_norm**2).ravel(), (x_norm * y_norm).ravel()
+        ])
+
+    valid_flat = valid_sky.ravel()
+    A_valid = A[valid_flat]
+    
+    corrected_channels = []
+    
+    for ch in range(c):
+        vals = small_img[..., ch].ravel()[valid_flat]
+        
+        # Rechazo de estrellas brillantes (percentil 10 a 65 del cielo)
+        p_low, p_high = np.percentile(vals, [5, 60])
+        samples = (vals >= p_low) & (vals <= p_high)
+        
+        # Ajuste analítico por mínimos cuadrados
+        coeff, _, _, _ = np.linalg.lstsq(A_valid[samples], vals[samples], rcond=None)
+        
+        # Evaluar superficie completa a escala real
+        y_f, x_f = np.mgrid[:h, :w]
+        x_fn = (x_f / (w - 1.0)) * 2.0 - 1.0
+        y_fn = (y_f / (h - 1.0)) * 2.0 - 1.0
+        
+        if degree == 1:
+            bg_full = coeff[0] + coeff[1]*x_fn + coeff[2]*y_fn
+        else:
+            bg_full = (coeff[0] + coeff[1]*x_fn + coeff[2]*y_fn + 
+                       coeff[3]*(x_fn**2) + coeff[4]*(y_fn**2) + coeff[5]*(x_fn*y_fn))
+                       
+        # Substracción preservando el valor medio
+        pedestal = float(np.median(vals[samples]))
+        ch_corr = img_rgb[..., ch] - bg_full + pedestal
+        corrected_channels.append(ch_corr)
+        
+    corrected = np.stack(corrected_channels, axis=-1)
+    
+    if sky_mask is not None:
+        m_full = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+        ksize = int(max(15, (min(h, w) // 150) | 1))
+        if ksize % 2 == 0: ksize += 1
+        m_smooth = cv2.GaussianBlur(m_full, (ksize, ksize), sigmaX=ksize/3.0)[..., np.newaxis]
+        return np.clip((corrected * m_smooth) + (img_rgb * (1.0 - m_smooth)), 0.0, 1.0).astype(np.float32)
+        
+    return np.clip(corrected, 0.0, 1.0).astype(np.float32)
+    
+def apply_clarity(img_rgb: np.ndarray, strength: float = 0.0) -> np.ndarray:
+    """
+    Contraste local (Claridad) en frecuencias medias.
+    strength: -2.0 a +2.0 (0.0 neutro).
+    """
+    if abs(strength) < 1e-4:
+        return img_rgb
+
+    # Luminancia perceptual
+    lum = 0.2126 * img_rgb[..., 0] + 0.7152 * img_rgb[..., 1] + 0.0722 * img_rgb[..., 2]
+    
+    h, w = img_rgb.shape[:2]
+    r = int(max(9, (min(h, w) // 35) | 1))
+    if r % 2 == 0:
+        r += 1
+
+    lum_blur = cv2.GaussianBlur(lum, (r, r), sigmaX=r / 3.0)
+    high_freq = lum - lum_blur
+
+    # Con strength hasta 2.0 usamos una respuesta suave para evitar saturación dura
+    factor = strength * 0.85
+    new_lum = np.clip(lum + high_freq * factor, 1e-6, 1.0)
+
+    ratio = (new_lum / np.maximum(1e-6, lum))[..., np.newaxis]
+    return np.clip(img_rgb * ratio, 0.0, 1.0).astype(np.float32)
+
+
+def apply_dehaze(img_rgb: np.ndarray, strength: float = 0.0) -> np.ndarray:
+    """
+    Borrar Neblina (Dehaze) con compensación de velo atmosférico y saturación.
+    strength: -2.0 a +2.0 (0.0 neutro).
+    """
+    if abs(strength) < 1e-4:
+        return img_rgb
+
+    dark_ch = np.min(img_rgb, axis=2)
+    h, w = img_rgb.shape[:2]
+    r = int(max(15, (min(h, w) // 25) | 1))
+    if r % 2 == 0:
+        r += 1
+        
+    haze_map = cv2.GaussianBlur(dark_ch, (r, r), sigmaX=r / 2.5)
+
+    if strength > 0:
+        # Transmisión escalada para tolerar valores de hasta 2.0 sin colapsar a 0
+        t = np.clip(1.0 - (strength * 0.45) * haze_map, 0.12, 1.0)[..., np.newaxis]
+        airlight = float(np.percentile(haze_map, 95)) * min(0.65, 0.35 * strength)
+        out = (img_rgb - airlight * (1.0 - t)) / t
+        
+        # Realce dinámico de saturación en zonas rescatadas de la bruma
+        lum = (0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2])[..., np.newaxis]
+        out = lum + (out - lum) * (1.0 + strength * 0.25)
+    else:
+        factor = min(0.85, abs(strength) * 0.35)
+        out = img_rgb * (1.0 - factor) + haze_map[..., np.newaxis] * factor
+
+    return np.clip(out, 0.0, 1.0).astype(np.float32)

@@ -4,14 +4,40 @@
 
 ---
 
-## Novedades de la Versión 0.3.2
+## Novedades destacadas de la Versión 0.4
 
-- **Alineación Robusta de Referencia Fija:** Registro estelar directo contra el fotograma base mediante homografía subpíxel RANSAC, eliminando la acumulación de deriva en el cielo.
-- **Protección Térmica del Suelo:** Desacoplo de la sustracción de *Master Dark* en la máscara terrestre para evitar el empastado de sombras, junto con un suavizado gaussiano de frontera para transiciones naturales en el horizonte.
-- **Editor de Curvas con Histograma Logarítmico:** Sustitución de controles fijos por un widget interactivo de curvas tonales con evaluación acelerada por LUT (Look-Up Table) y visualización en tiempo real del fondo de cielo.
-- **Compatibilidad con Archivos RAW:** Soporte directo para formatos RAW (`.NEF`, `.CR2`, `.CR3`, `.ARW`, `.DNG`) tanto en el apilador como en el panel de revelado.
-- **Limpieza de Arquitectura:** Eliminación de controles deprecados y desacoplo de eventos de refresco en la interfaz.
+### 1. Reducción de Contaminación Lumínica en el Apilado
+- **Sustracción de Domo (Sequator-Style):** Modelado analítico y sustracción del pedestal de baja frecuencia fija al encuadre antes de la alineación y el apilado. Neutraliza cúpulas lumínicas urbanas preservando el contraste galáctico sin artefactos en el horizonte.
+- **Rechazo Asimétrico (Min-Sigma):** Fusión adaptativa en la pila del cielo orientada a percentiles inferiores para descartar la dispersión lumínica fija durante ráfagas prolongadas.
+- **Normalización Local Fotométrica:** Compensación de variaciones de pedestal y transparencia atmosférica entre tomas individuales.
+- **Selector y Deslizador de Fuerza (0–100%):** Integración completa en la UI del apilador para conmutar dinámicamente entre algoritmos de apilado.
 
+### 2. Revelado Starless de Alta Dinámica
+- **Claridad y Borrar Neblina (Dehaze) Ampliados:** Rango extendido a $\pm 2.00$ con curvas de respuesta progresiva para extraer estructuras de polvo sin colapsar tonos medios.
+- **Editor de Curvas con Histograma en Tiempo Real:** Control tonal fino con visualización interactiva del histograma sobre la capa procesada.
+- **Pipeline de Capas Independiente:** Procesamiento no destructivo del fondo sin estrellas (StarNet++) con recombinación configurable de estrellas.
+- **Extracción de Gradientes Híbrida:** Modelo Polinómico Cuadrático nativo optimizado para suelo y cielo terrestre junto a integración con GraXpert AI.
+
+---
+
+## Estructura del Pipeline
+
+1. **Calibración y Alineación:**
+   - Detección de estrellas mediante ORB + refinamiento subpíxel de centroides.
+   - Alineación robusta por homografía RANSAC.
+   - Calibración por Master Dark y máscara guiada cielo/suelo.
+
+2. **Apilado Híbrido (CPU Multi-core / GPU CUDA):**
+   - Apilado independiente de cielo (estrellas alineadas) y suelo estático (sin distorsión).
+   - Rejection por Kappa-Sigma / MAD y opciones antipolución integradas.
+
+3. **Revelado Especializado:**
+   - Balance de blancos de precisión ($\pm 0.500$).
+   - Saturación diferencial y vibrance.
+   - Estirado MTF automático y manual.
+   - Separación estelar StarNet++ en espacio lineal de 32 bits.
+   - Exportación multiformato (TIFF 16-bit, TIFF 32-bit Float, JPEG 8-bit).
+   
 ---
 
 ## Características Principales

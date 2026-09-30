@@ -149,6 +149,37 @@ class StackerTab(QWidget):
         set_layout.addWidget(self.spin_kappa)
         left_layout.addWidget(grp_settings)
 
+        # --- Reducción de Polución en Apilado ---
+        grp_stack_lp = QGroupBox("Antipolución en Apilado")
+        layout_stack_lp = QVBoxLayout(grp_stack_lp)
+
+        row_lp_algo = QHBoxLayout()
+        row_lp_algo.addWidget(QLabel("Algoritmo:"))
+        self.combo_lp_algo = QComboBox()
+        self.combo_lp_algo.addItems([
+            "Estándar (Sin filtro)",
+            "Sustracción de Domo (Sequator)",
+            "Rechazo Asimétrico (Min-Sigma)",
+            "Normalización Local"
+        ])
+        row_lp_algo.addWidget(self.combo_lp_algo)
+        layout_stack_lp.addLayout(row_lp_algo)
+
+        row_lp_str = QHBoxLayout()
+        row_lp_str.addWidget(QLabel("Fuerza Antipolución:"))
+        self.lbl_lp_str = QLabel("50%")
+        row_lp_str.addWidget(self.lbl_lp_str)
+        layout_stack_lp.addLayout(row_lp_str)
+
+        self.slider_stack_lp = QSlider(Qt.Horizontal)
+        self.slider_stack_lp.setRange(0, 100)
+        self.slider_stack_lp.setValue(50)
+        self.slider_stack_lp.valueChanged.connect(self._on_stack_lp_changed)
+        layout_stack_lp.addWidget(self.slider_stack_lp)
+
+        # Se inserta en el layout de controles de apilado
+        left_layout.addWidget(grp_stack_lp)
+
         # SECCIÓN 4: Máscara Cielo / Suelo
         grp_mask = QGroupBox("Máscara Cielo / Suelo")
         mask_layout = QVBoxLayout(grp_mask)
@@ -399,7 +430,9 @@ class StackerTab(QWidget):
         self.project_mgr.data["dark_frames"] = self.darks_list
         self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
         self.project_mgr.data["parameters"] = {
-            "kappa": self.spin_kappa.value()
+            "kappa": self.spin_kappa.value(),
+            "lp_method_idx": self.combo_lp_algo.currentIndex(),
+            "lp_strength": self.slider_stack_lp.value()
         }
 
         self.project_mgr.save(filepath, mask_array=self.computed_mask)
@@ -434,6 +467,9 @@ class StackerTab(QWidget):
             self.combo_mode.setCurrentIndex(0 if mode == "fixed_tripod" else 1)
             params = data.get("parameters", {})
             self.spin_kappa.setValue(params.get("kappa", 2.2))
+
+            self.combo_lp_algo.setCurrentIndex(params.get("lp_method_idx", 0))
+            self.slider_stack_lp.setValue(params.get("lp_strength", 50))
 
             if self.lights_list:
                 self.load_frame_to_canvas(self.lights_list[0])
@@ -471,13 +507,22 @@ class StackerTab(QWidget):
         self.progress_bar.setValue(0)
         self.log_message("=== INICIANDO APILADO SUBPÍXEL CON CALIBRACIÓN ===")
 
+        # Mapeo del algoritmo seleccionado a clave interna
+        lp_mode_idx = self.combo_lp_algo.currentIndex()
+        lp_methods = ["standard", "sequator_subtraction", "min_rejection", "local_norm"]
+        selected_lp_method = lp_methods[lp_mode_idx]
+        selected_lp_strength = self.slider_stack_lp.value() / 100.0
+
         cfg = {
             "lights": self.lights_list,
             "darks": self.darks_list,
             "mask": self.computed_mask,
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
             "kappa": self.spin_kappa.value(),
-            "output_path": out_path
+            "output_path": out_path,
+            # Nuevos parámetros antipolución en apilado
+            "lp_method": selected_lp_method,
+            "lp_strength": selected_lp_strength
         }
 
         self.worker = StackingWorker(cfg)
@@ -500,3 +545,6 @@ class StackerTab(QWidget):
         self.btn_run.setEnabled(True)
         self.log_message(f"[ERROR CRÍTICO] {err_msg}")
         QMessageBox.critical(self, "Error durante el apilado", f"Ocurrió un error:\n{err_msg}")       
+
+    def _on_stack_lp_changed(self, val: int):
+        self.lbl_lp_str.setText(f"{val}%")

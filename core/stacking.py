@@ -89,6 +89,81 @@ def calibrate_light(light_img: np.ndarray, master_dark: np.ndarray = None) -> np
     return np.maximum(0.0, light_img - master_dark)
 
 
+# --- Motores de Reducción de Polución en Cuadros Individuales ---
+
+def estimate_frame_background_dome(img_rgb: np.ndarray, sky_mask: np.ndarray = None) -> np.ndarray:
+    """
+    Estima el fondo estático de baja frecuencia (cúpula de luz fija al sensor).
+    Similar a la extracción analítica local por subexposición de Sequator.
+    """
+    h, w, c = img_rgb.shape
+    scale = max(1, min(h, w) // 120)
+    sh, sw = max(16, h // scale), max(16, w // scale)
+
+    small_img = cv2.resize(img_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+
+    if sky_mask is not None:
+        sm_mask = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (sw, sh), interpolation=cv2.INTER_NEAREST)
+        k_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        valid_sky = cv2.erode((sm_mask > 0.5).astype(np.uint8), k_erode) > 0
+    else:
+        valid_sky = np.ones((sh, sw), dtype=bool)
+
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    bg_low = np.zeros_like(small_img)
+
+    for ch in range(c):
+        channel = small_img[..., ch]
+        opened = cv2.morphologyEx(channel, cv2.MORPH_OPEN, k_open)
+        sigma = max(5.0, min(sh, sw) / 10.0)
+        bg_low[..., ch] = cv2.GaussianBlur(opened, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+    bg_full = cv2.resize(bg_low, (w, h), interpolation=cv2.INTER_LINEAR)
+    return bg_full
+
+
+def preprocess_subframe_lp(
+    frame_rgb: np.ndarray,
+    method: str = "standard",
+    strength: float = 0.5,
+    sky_mask: np.ndarray = None,
+    ref_stats: dict = None
+) -> np.ndarray:
+    """
+    Preprocesa cada cuadro individual antes o después de la alineación.
+    method: 'standard', 'sequator_subtraction', 'min_rejection', 'local_norm'
+    """
+    if strength <= 1e-4 or method in ["standard", "min_rejection"]:
+        return frame_rgb
+
+    h, w, c = frame_rgb.shape
+
+    # 1. Modo Sequator: Sustracción del domo de fondo por cuadro
+    if method == "sequator_subtraction":
+        bg_dome = estimate_frame_background_dome(frame_rgb, sky_mask=sky_mask)
+        pedestal = np.percentile(frame_rgb, 5, axis=(0, 1))
+        corrected = frame_rgb - (bg_dome * strength) + (pedestal * strength)
+
+        if sky_mask is not None:
+            m = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)[..., np.newaxis]
+            return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
+        return np.clip(corrected, 0.0, 1.0).astype(np.float32)
+
+    # 2. Modo Normalización Fotométrica Local
+    elif method == "local_norm" and ref_stats is not None:
+        curr_median = np.median(frame_rgb, axis=(0, 1))
+        target_median = ref_stats.get('median', curr_median)
+        diff = (target_median - curr_median) * strength
+        corrected = frame_rgb + diff
+
+        if sky_mask is not None:
+            m = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)[..., np.newaxis]
+            return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
+        return np.clip(corrected, 0.0, 1.0).astype(np.float32)
+
+    return frame_rgb
+
+
 def detect_sky_stars(image_rgb: np.ndarray, sky_mask: np.ndarray = None, max_stars: int = 3500):
     h, w = image_rgb.shape[:2]
     gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
@@ -173,14 +248,13 @@ def register_consecutive_homography(prev_kp, prev_desc, prev_gray, curr_img, sky
 
 
 def _process_single_chunk(args):
-    file_paths, y_start, y_end, w, c, kappa = args
+    file_paths, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
     actual_rows = y_end - y_start
     bytes_per_row = w * c * 4
     current_read_bytes = actual_rows * bytes_per_row
     offset = y_start * bytes_per_row
 
     n_frames = len(file_paths)
-    # Asignar un array continuo directamente para evitar stacks repetidos en RAM
     sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
 
     for i, f in enumerate(file_paths):
@@ -190,16 +264,23 @@ def _process_single_chunk(args):
             sub_stack[i] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
 
     chunk_result = np.empty((actual_rows, w, c), dtype=np.float32)
-    upper_tol = kappa + 0.8
 
+    # Si se selecciona Rechazo Asimétrico / Min-Sigma
+    if lp_method == "min_rejection" and lp_strength > 1e-4:
+        target_p = max(5.0, 50.0 - (lp_strength * 40.0))
+        for ch in range(c):
+            channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
+            res = np.percentile(channel_data, target_p, axis=0)
+            chunk_result[:, :, ch] = res.reshape((actual_rows, w))
+        del sub_stack
+        return y_start, y_end, chunk_result
+
+    # Apilado estándar por Kappa-Sigma Clipping
+    upper_tol = kappa + 0.8
     for ch in range(c):
-        # Aplanar espacialmente el bloque para aprovechar la vectorización en C de NumPy
         channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
         
-        # Mediana rápida
         med = np.median(channel_data, axis=0)
-        
-        # MAD y Sigma
         abs_diff = np.abs(channel_data - med)
         mad = np.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
@@ -209,11 +290,9 @@ def _process_single_chunk(args):
 
         valid = (channel_data >= low) & (channel_data <= high)
         
-        # Conteo de píxeles válidos para cálculo directo sin generar arrays auxiliares de NaNs
         counts = np.sum(valid, axis=0)
         sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
         
-        # Donde no queden muestras válidas tras el rechazo, aplicar la mediana como fallback
         fallback = counts == 0
         counts[fallback] = 1
         res = sums / counts
@@ -225,14 +304,22 @@ def _process_single_chunk(args):
     return y_start, y_end, chunk_result
 
 
-def parallel_stream_stack(file_paths: list, shape: tuple, chunk_rows: int = 1200, kappa: float = 2.2, max_workers: int = None) -> np.ndarray:
+def parallel_stream_stack(
+    file_paths: list, 
+    shape: tuple, 
+    chunk_rows: int = 1200, 
+    kappa: float = 2.2, 
+    max_workers: int = None,
+    lp_method: str = "standard",
+    lp_strength: float = 0.5
+) -> np.ndarray:
     h, w, c = shape
     stacked_out = np.zeros((h, w, c), dtype=np.float32)
 
     tasks = []
     for y in range(0, h, chunk_rows):
         y_end = min(y + chunk_rows, h)
-        tasks.append((file_paths, y, y_end, w, c, kappa))
+        tasks.append((file_paths, y, y_end, w, c, kappa, lp_method, lp_strength))
 
     if max_workers is None:
         max_workers = max(1, os.cpu_count() - 1)
@@ -246,11 +333,21 @@ def parallel_stream_stack(file_paths: list, shape: tuple, chunk_rows: int = 1200
     return stacked_out
 
 
-def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float) -> np.ndarray:
+def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = "standard", lp_strength: float = 0.5) -> np.ndarray:
     n_frames, actual_rows, w, c = sub_stack_np.shape
     chunk_result = np.zeros((actual_rows, w, c), dtype=np.float32)
 
     sub_stack_gpu = cp.asarray(sub_stack_np)
+
+    if lp_method == "min_rejection" and lp_strength > 1e-4:
+        target_p = max(5.0, 50.0 - (lp_strength * 40.0))
+        for ch in range(c):
+            ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
+            res = cp.percentile(ch_data, target_p, axis=0)
+            chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
+        del sub_stack_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+        return chunk_result
 
     for ch in range(c):
         ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
@@ -277,7 +374,14 @@ def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float) -> np.ndarray:
     return chunk_result
 
 
-def stream_stack_auto(file_paths: list, shape: tuple, chunk_rows: int = 1000, kappa: float = 2.2) -> np.ndarray:
+def stream_stack_auto(
+    file_paths: list, 
+    shape: tuple, 
+    chunk_rows: int = 1000, 
+    kappa: float = 2.2,
+    lp_method: str = "standard",
+    lp_strength: float = 0.5
+) -> np.ndarray:
     h, w, c = shape
 
     if HAS_GPU:
@@ -303,11 +407,23 @@ def stream_stack_auto(file_paths: list, shape: tuple, chunk_rows: int = 1000, ka
                 sub_stack = np.stack(block_frames, axis=0)
                 del block_frames
 
-                stacked_out[y:y_end, :, :] = _process_chunk_gpu(sub_stack, kappa)
+                stacked_out[y:y_end, :, :] = _process_chunk_gpu(
+                    sub_stack, 
+                    kappa=kappa, 
+                    lp_method=lp_method, 
+                    lp_strength=lp_strength
+                )
                 del sub_stack
 
             return stacked_out
         except Exception:
             pass
 
-    return parallel_stream_stack(file_paths, shape, chunk_rows=chunk_rows, kappa=kappa)
+    return parallel_stream_stack(
+        file_paths, 
+        shape, 
+        chunk_rows=chunk_rows, 
+        kappa=kappa,
+        lp_method=lp_method,
+        lp_strength=lp_strength
+    )

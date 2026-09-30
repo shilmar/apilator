@@ -7,18 +7,26 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QMessageBox, QGroupBox, QSlider, QSplitter,
     QDoubleSpinBox, QTextEdit, QComboBox, QSpinBox,
-    QScrollArea, QFrame  # <-- Asegúrate de incluir estos dos
+    QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from core.stacking import load_image_as_float32
 from core.stretch import (
-    calculate_mtf_params, manual_stretch, 
-    apply_white_balance, adjust_saturation_dual,
-    adjust_vibrance, adjust_contrast,
-    apply_denoise, apply_curve_lut  # <-- Reemplazamos adjust_tonal_bands por apply_curve_lut
+    calculate_mtf_params, 
+    manual_stretch, 
+    apply_white_balance, 
+    adjust_saturation_dual, 
+    extract_background_polynomial,
+    adjust_vibrance, 
+    adjust_contrast, 
+    apply_light_pollution_gradient,
+    apply_denoise,
+    apply_clarity,
+    apply_dehaze,
+    apply_curve_lut
 )
-from gui.widgets.curve_widget import CurveWidget  # <-- Importamos el nuevo widget
+from gui.widgets.curve_widget import CurveWidget
 from gui.canvas import MaskCanvas
 from gui.worker import GraXpertWorker, StarNetWorker
 
@@ -26,11 +34,11 @@ from gui.worker import GraXpertWorker, StarNetWorker
 class DeveloperTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.image_32bit = None       # Imagen nativa base (float32)[cite: 2]
-        self.image_starless = None    # Capa sin estrellas (float32)[cite: 2]
-        self.image_stars = None       # Capa de solo estrellas (float32)[cite: 2]
+        self.image_32bit = None       # Imagen nativa base (float32)
+        self.image_starless = None    # Capa sin estrellas (float32)
+        self.image_stars = None       # Capa de solo estrellas (float32)
 
-        # Buffers proxy para previsualización interactiva a 60 fps[cite: 2]
+        # Buffers proxy para previsualización interactiva a 60 fps
         self.preview_proxy = None     
         self.proxy_starless = None
         self.proxy_stars = None
@@ -41,21 +49,20 @@ class DeveloperTab(QWidget):
         self.gx_worker = None
         self.sn_worker = None
 
+        self.lp_reduction = 0.0  # Rango 0.0 a 1.0 (Reducción contaminación lumínica)
+        self.clarity_starless_val = 0.0
+        self.dehaze_starless_val = 0.0
+        
         # Parámetros del revelador
         self.temp_val = 0.0          # Rango: -0.500 a +0.500
         self.tint_val = 0.0          # Rango: -0.500 a +0.500
-        self.sat_sky_val = 1.0       # 0.00x a 2.50x[cite: 1]
-        self.sat_gnd_val = 1.0       # 0.00x a 2.50x[cite: 1]
+        self.sat_sky_val = 1.0       # 0.00x a 2.50x
+        self.sat_gnd_val = 1.0       # 0.00x a 2.50x
         self.vibrance_val = 0.0      # -1.00 a +1.00
         self.contrast_val = 0.0      # -1.00 a +1.00
-        self.star_intensity = 1.0    # 1.0 = 100%, 0.0 = Starless puro[cite: 2]
-        self.view_layer_mode = 0     # 0: Compuesta, 1: Solo Fondo, 2: Solo Estrellas[cite: 2]
+        self.star_intensity = 1.0    # 1.0 = 100%, 0.0 = Starless puro
+        self.view_layer_mode = 0     # 0: Compuesta, 1: Solo Fondo, 2: Solo Estrellas
         self.contrast_starless_val = 0.0  # -1.0 a +1.0 (solo para el fondo sin estrellas)
-        # Parámetros tonales específicos para la capa Starless ([-1.0, 1.0])
-        self.starless_blacks = 0.0
-        self.starless_shadows = 0.0
-        self.starless_highlights = 0.0
-        self.starless_whites = 0.0
 
         # Parámetros de Reducción de Ruido
         self.denoise_strength = 0.0
@@ -85,87 +92,138 @@ class DeveloperTab(QWidget):
         btn_open_img.clicked.connect(self.open_image_file)
         left_layout.addWidget(btn_open_img)
 
-        # Módulo GraXpert Compacto
-        grp_graxpert = QGroupBox("GraXpert AI - Fondo y Gradientes")
-        gx_layout = QHBoxLayout(grp_graxpert)
-        gx_layout.setContentsMargins(8, 8, 8, 8)
-        gx_layout.setSpacing(6)
+        # --- Extracción de Fondo y Gradientes ---
+        grp_bg = QGroupBox("Extracción de Fondo y Gradientes")
+        layout_bg = QVBoxLayout(grp_bg)
 
-        gx_layout.addWidget(QLabel("Suavizado:"))
+        row_engine = QHBoxLayout()
+        row_engine.addWidget(QLabel("Motor:"))
+        self.combo_bg_engine = QComboBox()
+        self.combo_bg_engine.addItems(["Polinómico (Paisaje)", "GraXpert AI"])
+        row_engine.addWidget(self.combo_bg_engine)
+        layout_bg.addLayout(row_engine)
+
+        row_grax = QHBoxLayout()
+        self.lbl_smoothing = QLabel("Suavizado:")
+        row_grax.addWidget(self.lbl_smoothing)
         self.spin_smoothing = QDoubleSpinBox()
-        self.spin_smoothing.setRange(0.01, 1.0)
-        self.spin_smoothing.setValue(0.5)
+        self.spin_smoothing.setRange(0.1, 1.0)
         self.spin_smoothing.setSingleStep(0.05)
-        self.spin_smoothing.setFixedWidth(65)
-        gx_layout.addWidget(self.spin_smoothing)
+        self.spin_smoothing.setValue(0.50)
+        row_grax.addWidget(self.spin_smoothing)
 
-        self.btn_graxpert = QPushButton("Eliminar Gradientes")
-        self.btn_graxpert.setStyleSheet("font-weight: bold; background-color: #3b4252; color: #eceff4; padding: 4px;")
-        self.btn_graxpert.clicked.connect(self.run_graxpert)
-        gx_layout.addWidget(self.btn_graxpert)
+        self.btn_extract_bg = QPushButton("Eliminar Gradientes")
+        self.btn_extract_bg.clicked.connect(self.on_extract_background_clicked)
+        row_grax.addWidget(self.btn_extract_bg)
+        layout_bg.addLayout(row_grax)
 
-        left_layout.addWidget(grp_graxpert)
+        left_layout.addWidget(grp_bg)
 
-        # Módulo StarNet AI - Encabezado Compacto
+        # Control de Atenuación de Cúpula de Contaminación Lumínica
+        grp_lp = QGroupBox("Contaminación Lumínica")
+        layout_lp = QVBoxLayout(grp_lp)
+        row_lp = QHBoxLayout()
+        row_lp.addWidget(QLabel("Atenuar Cúpula de Luz:"))
+        self.lbl_lp = QLabel("0%")
+        row_lp.addWidget(self.lbl_lp)
+        layout_lp.addLayout(row_lp)
+
+        self.slider_lp = QSlider(Qt.Horizontal)
+        self.slider_lp.setRange(0, 100)
+        self.slider_lp.setValue(0)
+        self.slider_lp.valueChanged.connect(self.on_lp_changed)
+        layout_lp.addWidget(self.slider_lp)
+        left_layout.addWidget(grp_lp)
+
+        # --- StarNet++ AI Control de Estrellas ---
         grp_starnet = QGroupBox("StarNet++ AI - Control de Estrellas")
-        sn_layout = QVBoxLayout(grp_starnet)
-        sn_layout.setContentsMargins(8, 8, 8, 8)
-        sn_layout.setSpacing(5)
+        layout_starnet = QVBoxLayout(grp_starnet)
 
-        row_sn_action = QHBoxLayout()
-        row_sn_action.addWidget(QLabel("Paso:"))
+        # Configuración y botón de ejecución
+        row_sn = QHBoxLayout()
+        row_sn.addWidget(QLabel("Paso:"))
         self.spin_stride = QSpinBox()
         self.spin_stride.setRange(64, 512)
         self.spin_stride.setSingleStep(64)
         self.spin_stride.setValue(256)
-        self.spin_stride.setFixedWidth(60)
-        row_sn_action.addWidget(self.spin_stride)
+        row_sn.addWidget(self.spin_stride)
 
         self.btn_starnet = QPushButton("Separar Estrellas con StarNet")
-        self.btn_starnet.setStyleSheet("font-weight: bold; background-color: #434c5e; color: #eceff4; padding: 4px;")
         self.btn_starnet.clicked.connect(self.run_starnet)
-        row_sn_action.addWidget(self.btn_starnet)
-        sn_layout.addLayout(row_sn_action)
+        row_sn.addWidget(self.btn_starnet)
+        layout_starnet.addLayout(row_sn)
 
-        row_mode = QHBoxLayout()
-        row_mode.addWidget(QLabel("Capa visible:"))
+        # Capa visible
+        row_view = QHBoxLayout()
+        row_view.addWidget(QLabel("Capa visible:"))
         self.combo_layer = QComboBox()
         self.combo_layer.addItems(["Compuesta (Normal)", "Solo Fondo (Starless)", "Solo Estrellas"])
         self.combo_layer.setEnabled(False)
         self.combo_layer.currentIndexChanged.connect(self.on_layer_mode_changed)
-        row_mode.addWidget(self.combo_layer)
-        sn_layout.addLayout(row_mode)
+        row_view.addWidget(self.combo_layer)
+        layout_starnet.addLayout(row_view)
 
-        row_star_slider = QHBoxLayout()
-        row_star_slider.addWidget(QLabel("Intensidad Estrellas:"))
-        self.lbl_star_intensity = QLabel("100%")
-        row_star_slider.addWidget(self.lbl_star_intensity)
-        sn_layout.addLayout(row_star_slider)
+        # Intensidad de Estrellas
+        row_stars = QHBoxLayout()
+        row_stars.addWidget(QLabel("Intensidad Estrellas:"))
+        self.lbl_stars = QLabel("100%")
+        row_stars.addWidget(self.lbl_stars)
+        layout_starnet.addLayout(row_stars)
 
         self.slider_stars = QSlider(Qt.Horizontal)
-        self.slider_stars.setRange(0, 150)
+        self.slider_stars.setRange(0, 200)
         self.slider_stars.setValue(100)
         self.slider_stars.setEnabled(False)
-        self.slider_stars.valueChanged.connect(self.on_star_intensity_changed)
-        sn_layout.addWidget(self.slider_stars)
+        self.slider_stars.valueChanged.connect(self.on_stars_slider_changed)
+        layout_starnet.addWidget(self.slider_stars)
 
-        # Contraste específico para la capa de fondo (Starless) con rango +-1.000
-        row_sn_cnt = QHBoxLayout()
-        row_sn_cnt.addWidget(QLabel("Contraste Fondo (Starless):"))
-        self.lbl_contrast_starless = QLabel("0.000")
-        row_sn_cnt.addWidget(self.lbl_contrast_starless)
-        sn_layout.addLayout(row_sn_cnt)
+        # Contraste Fondo (Starless)
+        row_cs = QHBoxLayout()
+        row_cs.addWidget(QLabel("Contraste Fondo (Starless):"))
+        self.lbl_contrast_starless = QLabel("0.00")
+        row_cs.addWidget(self.lbl_contrast_starless)
+        layout_starnet.addLayout(row_cs)
 
         self.slider_contrast_starless = QSlider(Qt.Horizontal)
-        self.slider_contrast_starless.setRange(-1000, 1000)  # <-- De -1000 a +1000
+        self.slider_contrast_starless.setRange(-100, 100)
         self.slider_contrast_starless.setValue(0)
         self.slider_contrast_starless.setEnabled(False)
         self.slider_contrast_starless.valueChanged.connect(self.on_contrast_starless_changed)
-        sn_layout.addWidget(self.slider_contrast_starless)
+        layout_starnet.addWidget(self.slider_contrast_starless)
+
+        # Claridad (Starless)
+        row_clarity = QHBoxLayout()
+        row_clarity.addWidget(QLabel("Claridad Fondo:"))
+        self.lbl_clarity = QLabel("0.00")
+        row_clarity.addWidget(self.lbl_clarity)
+        layout_starnet.addLayout(row_clarity)
+
+        self.slider_clarity = QSlider(Qt.Horizontal)
+        self.slider_clarity.setRange(-200, 200)
+        self.slider_clarity.setValue(0)
+        self.slider_clarity.setEnabled(False)
+        self.slider_clarity.valueChanged.connect(self.on_clarity_changed)
+        layout_starnet.addWidget(self.slider_clarity)
+
+        # Borrar Neblina (Dehaze Starless)
+        row_dehaze = QHBoxLayout()
+        row_dehaze.addWidget(QLabel("Borrar Neblina:"))
+        self.lbl_dehaze = QLabel("0.00")
+        row_dehaze.addWidget(self.lbl_dehaze)
+        layout_starnet.addLayout(row_dehaze)
+
+        self.slider_dehaze = QSlider(Qt.Horizontal)
+        self.slider_dehaze.setRange(-200, 200)
+        self.slider_dehaze.setValue(0)
+        self.slider_dehaze.setEnabled(False)
+        self.slider_dehaze.valueChanged.connect(self.on_dehaze_changed)
+        layout_starnet.addWidget(self.slider_dehaze)
+
+        left_layout.addWidget(grp_starnet)
         
         # --- Reducción de Ruido (Denoise) ---
-        lbl_dn = QLabel("<b>Reducción de Ruido (Fondo):</b>")
-        sn_layout.addWidget(lbl_dn)
+        grp_dn = QGroupBox("Reducción de Ruido (Fondo)")
+        layout_dn = QVBoxLayout(grp_dn)
 
         row_dn_mode = QHBoxLayout()
         row_dn_mode.addWidget(QLabel("Método:"))
@@ -174,22 +232,22 @@ class DeveloperTab(QWidget):
         self.combo_denoise.setEnabled(False)
         self.combo_denoise.currentTextChanged.connect(self.on_denoise_method_changed)
         row_dn_mode.addWidget(self.combo_denoise)
-        sn_layout.addLayout(row_dn_mode)
+        layout_dn.addLayout(row_dn_mode)
 
         row_dn = QHBoxLayout()
         row_dn.addWidget(QLabel("Fuerza Denoise:"))
         self.lbl_denoise = QLabel("0%")
         row_dn.addWidget(self.lbl_denoise)
-        sn_layout.addLayout(row_dn)
+        layout_dn.addLayout(row_dn)
         
         self.slider_denoise = QSlider(Qt.Horizontal)
         self.slider_denoise.setRange(0, 100)
         self.slider_denoise.setValue(0)
         self.slider_denoise.setEnabled(False)
         self.slider_denoise.valueChanged.connect(self.on_denoise_changed)
-        sn_layout.addWidget(self.slider_denoise)
-        
-        left_layout.addWidget(grp_starnet)
+        layout_dn.addWidget(self.slider_denoise)
+
+        left_layout.addWidget(grp_dn)
         
         # --- Editor de Curvas con Histograma de Fondo ---
         grp_curves = QGroupBox("Curvas de Tono (Fondo e Histograma)")
@@ -208,7 +266,7 @@ class DeveloperTab(QWidget):
         row_crv_btn.addWidget(self.btn_reset_curve)
         curves_layout.addLayout(row_crv_btn)
 
-        sn_layout.addWidget(grp_curves)
+        left_layout.addWidget(grp_curves)
               
         # Módulo Balance de Blancos (Control Fino +-0.500)
         grp_wb = QGroupBox("Balance de Blancos (Precisión Fina)")
@@ -373,18 +431,16 @@ class DeveloperTab(QWidget):
         left_layout.addWidget(self.txt_log)
         left_layout.addStretch()
 
-        # AHORA:
+        # Configuración Scroll
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll_area.setWidget(left_panel)
 
-        # Los anchos se fijan aquí, en el contenedor del scroll
         scroll_area.setMinimumWidth(380)
         scroll_area.setMaximumWidth(450)
 
-        # Estilo para la barra de desplazamiento
         scroll_area.setStyleSheet("""
             QScrollArea {
                 border: none;
@@ -432,6 +488,15 @@ class DeveloperTab(QWidget):
         max_dim = 1600.0
         scale = min(1.0, max_dim / max(h, w))
 
+        clean_mask = None
+        if self.current_mask is not None:
+            clean_mask = np.squeeze(self.current_mask)
+            if clean_mask.ndim > 2:
+                clean_mask = clean_mask[..., 0]
+            clean_mask = clean_mask.astype(np.float32)
+            if clean_mask.shape != (h, w):
+                clean_mask = cv2.resize(clean_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+
         if scale < 1.0:
             pw = (int(w * scale) // 4) * 4
             ph = (int(h * scale) // 4) * 4
@@ -446,10 +511,11 @@ class DeveloperTab(QWidget):
                     cv2.resize(self.image_stars, (pw, ph), interpolation=cv2.INTER_AREA), dtype=np.float32
                 )
 
-            if self.current_mask is not None:
-                m_small = cv2.resize(self.current_mask, (pw, ph), interpolation=cv2.INTER_LINEAR)
+            if clean_mask is not None:
+                m_small = cv2.resize(clean_mask, (pw, ph), interpolation=cv2.INTER_LINEAR)
                 ksize = int(max(7, (min(ph, pw) // 150) | 1))
-                if ksize % 2 == 0: ksize += 1
+                if ksize % 2 == 0: 
+                    ksize += 1
                 sm = cv2.GaussianBlur(m_small, (ksize, ksize), sigmaX=ksize / 3.0)
                 self.proxy_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
             else:
@@ -458,10 +524,11 @@ class DeveloperTab(QWidget):
             self.preview_proxy = np.ascontiguousarray(self.image_32bit, dtype=np.float32)
             self.proxy_starless = self.image_starless.copy() if self.image_starless is not None else None
             self.proxy_stars = self.image_stars.copy() if self.image_stars is not None else None
-            if self.current_mask is not None:
+            if clean_mask is not None:
                 ksize = int(max(15, (min(h, w) // 150) | 1))
-                if ksize % 2 == 0: ksize += 1
-                sm = cv2.GaussianBlur(self.current_mask, (ksize, ksize), sigmaX=ksize / 3.0)
+                if ksize % 2 == 0: 
+                    ksize += 1
+                sm = cv2.GaussianBlur(clean_mask, (ksize, ksize), sigmaX=ksize / 3.0)
                 self.proxy_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
             else:
                 self.proxy_mask = None
@@ -478,7 +545,6 @@ class DeveloperTab(QWidget):
         self.slider_contrast_starless.setValue(0)
         self.contrast_starless_val = 0.0
         self.lbl_contrast_starless.setText("0.00")        
-        # En lugar de los sliders antiguos de bandas tonales:
         if hasattr(self, 'curve_widget'):
             self.curve_widget.reset_curve()
         self.combo_denoise.setEnabled(False)
@@ -526,7 +592,7 @@ class DeveloperTab(QWidget):
         if starless is None or stars is None:
             return base
 
-        processed_starless = starless
+        processed_starless = starless.copy()
 
         # 1. Reducción de Ruido (Denoise) en Starless lineal
         if self.denoise_strength > 1e-4:
@@ -541,7 +607,22 @@ class DeveloperTab(QWidget):
             else:
                 processed_starless = denoised
 
-        # 2. Mezcla de capas
+        # 2. Claridad y Borrar Neblina (Dehaze) sobre Starless
+        if abs(self.clarity_starless_val) > 1e-4:
+            clarified = apply_clarity(processed_starless, strength=self.clarity_starless_val)
+            if mask_3d is not None:
+                processed_starless = (clarified * mask_3d) + (processed_starless * (1.0 - mask_3d))
+            else:
+                processed_starless = clarified
+
+        if abs(self.dehaze_starless_val) > 1e-4:
+            dehazed = apply_dehaze(processed_starless, strength=self.dehaze_starless_val)
+            if mask_3d is not None:
+                processed_starless = (dehazed * mask_3d) + (processed_starless * (1.0 - mask_3d))
+            else:
+                processed_starless = dehazed
+
+        # 3. Mezcla de capas
         if self.view_layer_mode == 0:  # Compuesta
             composed = processed_starless + (stars * self.star_intensity)
             return np.clip(composed, 0.0, 1.0)
@@ -579,7 +660,12 @@ class DeveloperTab(QWidget):
         if abs(self.vibrance_val) > 1e-4:
             img = adjust_vibrance(img, self.vibrance_val)
 
-        # 4. Estirado MTF (la imagen pasa a espacio perceptual visible [0.0, 1.0])
+        # Atenuación de Cúpula de Luz
+        if self.lp_reduction > 1e-4:
+            mask_2d = precomputed_mask[..., 0] if precomputed_mask is not None else None
+            img = apply_light_pollution_gradient(img, strength=self.lp_reduction, height_ratio=0.50, sky_mask=mask_2d)
+
+        # 4. Estirado MTF (espacio visible [0.0, 1.0])
         bp_val = self.spin_bp.value()
         m_val = self.spin_mtf.value()
         stretched = manual_stretch(img, black_point=bp_val, midtone=m_val)
@@ -623,7 +709,6 @@ class DeveloperTab(QWidget):
 
         if stretched is not None:
             self.canvas.load_image(base_to_render, display_stretched=stretched)
-            # Actualiza el histograma de fondo de la curva
             self.curve_widget.set_histogram_from_image(stretched)
 
     # --- Callbacks StarNet ---
@@ -653,18 +738,20 @@ class DeveloperTab(QWidget):
 
         self.combo_layer.setEnabled(True)
         self.slider_stars.setEnabled(True)
-        self.slider_contrast_starless.setEnabled(True)  # <-- Activar aquí
-        # Habilitar los nuevos controles
-        #self.slider_sn_blacks.setEnabled(True)
-        #self.slider_sn_shadows.setEnabled(True)
-        #self.slider_sn_highlights.setEnabled(True)
-        #self.slider_sn_whites.setEnabled(True)
+        self.slider_contrast_starless.setEnabled(True) 
+        self.slider_clarity.setEnabled(True)
+        self.slider_dehaze.setEnabled(True)
         self.combo_denoise.setEnabled(True)
         self.slider_denoise.setEnabled(True)
 
         self._generate_preview_proxy()
         self.update_stretch_preview()
         self.log_message("[STARNET] Estrellas separadas en lineal. Capas activadas.")
+        
+    def on_stars_slider_changed(self, val: int):
+        self.star_intensity = val / 100.0
+        self.lbl_stars.setText(f"{val}%")
+        self.update_stretch_preview()
 
     def on_starnet_error(self, err_msg: str):
         self.btn_starnet.setEnabled(True)
@@ -674,11 +761,6 @@ class DeveloperTab(QWidget):
     def on_layer_mode_changed(self, idx: int):
         self.view_layer_mode = idx
         self.slider_stars.setEnabled(idx == 0)
-        self.update_stretch_preview()
-
-    def on_star_intensity_changed(self, val: int):
-        self.star_intensity = val / 100.0
-        self.lbl_star_intensity.setText(f"{val}%")
         self.update_stretch_preview()
 
     # --- Callbacks Balance de Blancos Fino (+-0.500) ---
@@ -812,72 +894,82 @@ class DeveloperTab(QWidget):
         else:
             self.sync_controls(0.0, 0.10)
 
-    # --- GraXpert ---
-    def run_graxpert(self):
+    # --- Extracción de Fondo ---
+    def on_extract_background_clicked(self):
         if self.image_32bit is None:
-            QMessageBox.warning(self, "Aviso", "Carga o apila una imagen primero.")
             return
 
-        self.btn_graxpert.setEnabled(False)
-        self.log_message("=== INICIANDO GRAXPERT AI ===")
-        smoothing = self.spin_smoothing.value()
+        engine = self.combo_bg_engine.currentText()
 
-        self.gx_worker = GraXpertWorker(self.image_32bit, sky_mask=self.current_mask, smoothing=smoothing)
-        self.gx_worker.status_changed.connect(self.log_message)
-        self.gx_worker.finished_success.connect(self.on_graxpert_success)
-        self.gx_worker.error_occurred.connect(self.on_graxpert_error)
-        self.gx_worker.start()
+        if "Polinómico" in engine:
+            self.log_message("[FONDO] Extrayendo gradiente con modelo Polinómico Cuadrático...")
+            try:
+                corrected = extract_background_polynomial(
+                    self.image_32bit, 
+                    sky_mask=self.current_mask, 
+                    degree=2
+                )
+                self.on_bg_extraction_success(corrected)
+                self.log_message("[FONDO] Gradiente polinómico neutralizado con éxito.")
+            except Exception as e:
+                self.log_message(f"[ERROR FONDO] Fallo en cálculo polinómico: {e}")
+        else:
+            self.btn_extract_bg.setEnabled(False)
+            self.log_message("=== INICIANDO GRAXPERT ===")
+            self.gx_worker = GraXpertWorker(
+                self.image_32bit,
+                sky_mask=self.current_mask,
+                smoothing=self.spin_smoothing.value()
+            )
+            self.gx_worker.status_changed.connect(self.log_message)
+            self.gx_worker.finished_success.connect(self.on_bg_extraction_success)
+            self.gx_worker.error_occurred.connect(self.on_bg_extraction_error)
+            self.gx_worker.start()
 
-    def on_graxpert_success(self, corrected_img: np.ndarray):
-        self.btn_graxpert.setEnabled(True)
+    def on_bg_extraction_success(self, corrected_img: np.ndarray):
+        self.btn_extract_bg.setEnabled(True)
         self.image_32bit = np.ascontiguousarray(corrected_img, dtype=np.float32)
+        
         self.image_starless = None
         self.image_stars = None
         self.combo_layer.setEnabled(False)
         self.slider_stars.setEnabled(False)
+        
         self._generate_preview_proxy()
         self.update_stretch_preview()
+        
         self.slider_contrast_starless.setEnabled(False)
         self.slider_contrast_starless.setValue(0)
         self.contrast_starless_val = 0.0
         self.lbl_contrast_starless.setText("0.00")
-        self.log_message("[GRAXPERT] Fondo neutralizado y aplicado.")
-        #for s in (self.slider_sn_blacks, self.slider_sn_shadows,
-        #          self.slider_sn_highlights, self.slider_sn_whites, self.slider_denoise):
-        #    s.setEnabled(False)
-        #    s.setValue(0)
+        self.slider_denoise.setEnabled(False)
+        self.slider_denoise.setValue(0)
         self.combo_denoise.setEnabled(False)
 
-    def on_graxpert_error(self, err_msg: str):
-        self.btn_graxpert.setEnabled(True)
+    def on_bg_extraction_error(self, err_msg: str):
+        self.btn_extract_bg.setEnabled(True)
         self.log_message(f"[ERROR GRAXPERT] {err_msg}")
         QMessageBox.warning(self, "Error en GraXpert", err_msg)
 
-    def on_contrast_starless_changed(self, val: int):
-        self.contrast_starless_val = val / 1000.0  # Mapea -1000..1000 a -1.000..+1.000
-        self.lbl_contrast_starless.setText(f"{self.contrast_starless_val:+.3f}")
+    def on_lp_changed(self, val: int):
+        self.lp_reduction = val / 100.0
+        self.lbl_lp.setText(f"{val}%")
         self.update_stretch_preview()
-    
-    #def on_sn_blacks_changed(self, val: int):
-    #    self.starless_blacks = val / 100.0
-    #    self.lbl_sn_blacks.setText(f"{self.starless_blacks:+.2f}")
-    #    self.update_stretch_preview()
-    #
-    #def on_sn_shadows_changed(self, val: int):
-    #    self.starless_shadows = val / 100.0
-    #    self.lbl_sn_shadows.setText(f"{self.starless_shadows:+.2f}")
-    #    self.update_stretch_preview()
-    #
-    #def on_sn_highlights_changed(self, val: int):
-    #    self.starless_highlights = val / 100.0
-    #    self.lbl_sn_highlights.setText(f"{self.starless_highlights:+.2f}")
-    #    self.update_stretch_preview()
-    #
-    #def on_sn_whites_changed(self, val: int):
-    #    self.starless_whites = val / 100.0
-    #    self.lbl_sn_whites.setText(f"{self.starless_whites:+.2f}")
-    #    self.update_stretch_preview()
 
+    def on_contrast_starless_changed(self, val: int):
+        self.contrast_starless_val = val / 100.0
+        self.lbl_contrast_starless.setText(f"{self.contrast_starless_val:+.2f}")
+        self.update_stretch_preview()
+        
+    def on_clarity_changed(self, val: int):
+        self.clarity_starless_val = val / 100.0  # Mapea -200..200 a -2.00..+2.00
+        self.lbl_clarity.setText(f"{self.clarity_starless_val:+.2f}")
+        self.update_stretch_preview()
+
+    def on_dehaze_changed(self, val: int):
+        self.dehaze_starless_val = val / 100.0  # Mapea -200..200 a -2.00..+2.00
+        self.lbl_dehaze.setText(f"{self.dehaze_starless_val:+.2f}")
+        self.update_stretch_preview()
     def on_denoise_method_changed(self, text: str):
         self.denoise_method = text
         self.update_stretch_preview()
@@ -893,8 +985,8 @@ class DeveloperTab(QWidget):
             return
 
         filtros = (
-            "TIFF 32-bit Float (*.tif *.tiff);;"
             "TIFF 16-bit (*.tif *.tiff);;"
+            "TIFF 32-bit Float (*.tif *.tiff);;"
             "JPEG (*.jpg *.jpeg)"
         )
 
@@ -904,44 +996,61 @@ class DeveloperTab(QWidget):
         if not p:
             return
 
+        p = os.path.abspath(os.path.normpath(str(p).strip()))
+
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError as err:
+                QMessageBox.critical(
+                    self, "Error de Exportación",
+                    f"No se puede sobreescribir el archivo destino porque está abierto en otro programa:\n{p}\n\nDetalle: {err}"
+                )
+                return
+
         h_full, w_full = self.image_32bit.shape[:2]
         self.log_message(f"Exportando imagen completa ({w_full}x{h_full} px)...")
 
-        # 1. Composición de base nativa
         full_base = self._compose_active_base(for_export=True)
 
-        # 2. Máscara diferencial completa
         full_mask = None
-        if self.current_mask is not None and (self.sat_sky_val != self.sat_gnd_val):
-            if self.current_mask.shape[:2] != (h_full, w_full):
-                m_full = cv2.resize(self.current_mask, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
-            else:
-                m_full = self.current_mask
+        if self.current_mask is not None:
+            clean_m = np.squeeze(self.current_mask)
+            if clean_m.ndim > 2:
+                clean_m = clean_m[..., 0]
+            clean_m = clean_m.astype(np.float32)
+
+            if clean_m.shape != (h_full, w_full):
+                clean_m = cv2.resize(clean_m, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+
             ksize = int(max(15, (min(h_full, w_full) // 150) | 1))
-            if ksize % 2 == 0: ksize += 1
-            sm = cv2.GaussianBlur(m_full, (ksize, ksize), sigmaX=ksize / 3.0)
+            if ksize % 2 == 0:
+                ksize += 1
+            sm = cv2.GaussianBlur(clean_m, (ksize, ksize), sigmaX=ksize / 3.0)
             full_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
 
-        # 3. Procesar cadena sobre la base compuesta
         processed = self._apply_pipeline_on_image(full_base, precomputed_mask=full_mask)
 
-        # 4. Guardar archivo
         ext = os.path.splitext(p)[1].lower()
-        if ext in ['.jpg', '.jpeg']:
-            bgr8 = cv2.cvtColor((processed * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            cv2.imwrite(p, bgr8, [cv2.IMWRITE_JPEG_QUALITY, 96])
-            desc = "JPEG 8-bit"
-        elif "32-bit" in selected_filter:
-            out32 = np.clip(processed, 0.0, 1.0).astype(np.float32)
-            tifffile.imwrite(p, out32, compression='zlib', photometric='rgb')
-            desc = "TIFF 32-bit float"
-        else:
-            u16 = (np.clip(processed, 0.0, 1.0) * 65535.0).astype(np.uint16)
-            tifffile.imwrite(p, u16, compression='zlib', photometric='rgb')
-            desc = "TIFF 16-bit"
+        try:
+            if ext in ['.jpg', '.jpeg']:
+                bgr8 = cv2.cvtColor((np.clip(processed, 0.0, 1.0) * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                cv2.imwrite(p, bgr8, [cv2.IMWRITE_JPEG_QUALITY, 96])
+                desc = "JPEG 8-bit"
+            elif "32-bit" in selected_filter:
+                out32 = np.ascontiguousarray(np.clip(processed, 0.0, 1.0), dtype=np.float32)
+                tifffile.imwrite(p, out32, compression='zlib', photometric='rgb')
+                desc = "TIFF 32-bit float"
+            else:
+                u16 = np.ascontiguousarray((np.clip(processed, 0.0, 1.0) * 65535.0), dtype=np.uint16)
+                tifffile.imwrite(p, u16, compression='zlib', photometric='rgb')
+                desc = "TIFF 16-bit"
 
-        self.log_message(f"Imagen guardada en: {os.path.basename(p)} ({desc})")
-        QMessageBox.information(
-            self, "Exportación", 
-            f"Guardada con éxito en resolución completa:\n{p}\n\nFormato: {desc} ({w_full}x{h_full} px)"
-        )
+            self.log_message(f"Imagen guardada en: {os.path.basename(p)} ({desc})")
+            QMessageBox.information(
+                self, "Exportación",
+                f"Guardada con éxito en resolución completa:\n{p}\n\nFormato: {desc} ({w_full}x{h_full} px)"
+            )
+        except Exception as e:
+            self.log_message(f"[ERROR EXPORT] Fallo al escribir el archivo: {e}")
+            QMessageBox.critical(self, "Error de Exportación", f"Fallo al escribir el archivo:\n{e}")

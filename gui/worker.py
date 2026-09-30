@@ -15,6 +15,7 @@ from core.stacking import (
     stream_stack_auto,
     create_master_dark,
     calibrate_light,
+    preprocess_subframe_lp,          # <--- Nuevo import antipolución
     HAS_GPU
 )
 from core.graxpert_bridge import run_graxpert_background_extraction
@@ -52,6 +53,10 @@ class StackingWorker(QThread):
             kappa = float(self.config.get("kappa", 2.2))
             output_path = self.config.get("output_path", "resultado_dual_32bit.tiff")
 
+            # Parámetros antipolución procedentes de la UI
+            lp_method = self.config.get("lp_method", "standard")
+            lp_strength = float(self.config.get("lp_strength", 0.5))
+
             if len(lights) < 2:
                 self.error_occurred.emit("Se necesitan al menos 2 tomas de luz para apilar.")
                 return
@@ -70,16 +75,18 @@ class StackingWorker(QThread):
             ref_path = lights[0]
             self.status_changed.emit(f"Cargando toma de referencia: {os.path.basename(ref_path)}")
             
-            # Cargar imagen base pura
             ref_raw = load_image_as_float32(ref_path)
             h, w, c = ref_raw.shape
 
             if sky_mask is not None and sky_mask.shape != (h, w):
                 sky_mask = cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_LINEAR)
 
-            # Para el cielo se calibra con dark; si no hay dark, pasa íntegra
             ref_sky = calibrate_light(ref_raw, master_dark)
 
+            # Estadísticas de referencia para Normalización Local
+            ref_stats = {"median": np.median(ref_sky, axis=(0, 1))}
+
+            # Detección de estrellas sobre la referencia
             self.status_changed.emit("Extrayendo estrellas de la toma de referencia...")
             ref_kp, ref_desc, norm_type = detect_sky_stars(ref_sky, sky_mask=sky_mask)
             ref_gray = cv2.cvtColor((ref_sky * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
@@ -91,21 +98,29 @@ class StackingWorker(QThread):
             sky_temp_files = []
             ground_temp_files = []
 
+            # Aplicar antipolución subframe a la toma de referencia (si corresponde)
+            ref_sky_processed = preprocess_subframe_lp(
+                ref_sky,
+                method=lp_method,
+                strength=lp_strength,
+                sky_mask=sky_mask,
+                ref_stats=ref_stats
+            )
+
             # Guardar referencia 0 para el cielo
             p_sky_0 = os.path.join(temp_dir, "sky_0.bin")
-            save_frame_float32(p_sky_0, ref_sky)
+            save_frame_float32(p_sky_0, ref_sky_processed)
             sky_temp_files.append(p_sky_0)
 
-            # Guardar referencia 0 para el suelo (la imagen original sin recortar pedestales)
+            # Guardar referencia 0 para el suelo (suelo original sin recortar)
             if mode == "fixed_tripod":
                 p_gnd_0 = os.path.join(temp_dir, "gnd_0.bin")
                 save_frame_float32(p_gnd_0, ref_raw)
                 ground_temp_files.append(p_gnd_0)
 
-            del ref_raw, ref_sky
+            del ref_raw, ref_sky, ref_sky_processed
             gc.collect()
 
-            # Matcher configurado para emparejar contra la referencia fija
             bf = cv2.BFMatcher(norm_type, crossCheck=False)
             total_lights = len(lights)
             discarded_count = 0
@@ -159,8 +174,17 @@ class StackingWorker(QThread):
                         borderMode=cv2.BORDER_REFLECT
                     )
 
+                    # Preprocesar antipolución sobre el frame alineado antes de persistirlo
+                    warped_processed = preprocess_subframe_lp(
+                        warped,
+                        method=lp_method,
+                        strength=lp_strength,
+                        sky_mask=sky_mask,
+                        ref_stats=ref_stats
+                    )
+
                     p_sky = os.path.join(temp_dir, f"sky_{idx-1}.bin")
-                    save_frame_float32(p_sky, warped)
+                    save_frame_float32(p_sky, warped_processed)
                     sky_temp_files.append(p_sky)
 
                     if mode == "fixed_tripod":
@@ -172,7 +196,7 @@ class StackingWorker(QThread):
                     self.status_changed.emit(
                         f"[{idx}/{total_lights}] {filename} -> OK ({num_inliers} inliers | Subpíxel | dx: {dx:.1f}px, dy: {dy:.1f}px)"
                     )
-                    del warped
+                    del warped, warped_processed
 
                 except Exception as e:
                     discarded_count += 1
@@ -190,9 +214,20 @@ class StackingWorker(QThread):
             backend_label = "GPU CUDA (NVIDIA)" if HAS_GPU else "CPU Multi-Core"
 
             if self._is_cancelled: return
-            self.status_changed.emit(f"Apilando Cielo ({len(sky_temp_files)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
+            self.status_changed.emit(
+                f"Apilando Cielo ({len(sky_temp_files)} tomas) con [{backend_label}] (Kappa={kappa:.1f}, LP={lp_method})..."
+            )
             self.progress_changed.emit(55)
-            sky_stacked = stream_stack_auto(sky_temp_files, (h, w, c), chunk_rows=800, kappa=kappa)
+
+            # Integración del cielo (soporta rechazo Min-Sigma si fue el método seleccionado)
+            sky_stacked = stream_stack_auto(
+                sky_temp_files, 
+                (h, w, c), 
+                chunk_rows=800, 
+                kappa=kappa,
+                lp_method=lp_method,
+                lp_strength=lp_strength
+            )
 
             if sky_mask is not None and mode == "fixed_tripod":
                 if self._is_cancelled: return
@@ -232,8 +267,7 @@ class StackingWorker(QThread):
         finally:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
-
-
+                
 class GraXpertWorker(QThread):
     finished_success = Signal(np.ndarray)
     error_occurred = Signal(str)
