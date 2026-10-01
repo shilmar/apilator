@@ -4,22 +4,25 @@
 
 ---
 
-## Novedades destacadas de la Versión 0.4.1
+## Novedades de la versión 0.5.0
 
-### Experiencia de Usuario y Flujo de Máscaras
-- **Consistencia cromática:** La visualización de la máscara refinada adopta el mismo verde esmeralda que el pincel de cielo (y rojo sutil para el suelo) en lugar del tono azul anterior.
-- **Ajustes sobre la mascara Cielo /Suelo:** Transparencia equilibrada para mantener despejada la visibilidad del horizonte y los detalles del terreno. Añadidos parámetros ajustables de refinamiento: Incorporación de controles directos para el radio de suavizado/difuminado gaussiano y el número de iteraciones del algoritmo GrabCut. Añadida una opcion para ocultar o mostrar los trazos del pincel.
-- **Edición continua no destructiva:** Los trazos del pincel permanecen activos y superpuestos tras refinar la máscara, permitiendo corregir fugas o bordes complejos y recalcular sin necesidad de limpiar o reiniciar el trabajo.
+Esta versión optimiza los cuellos de botella del pipeline de apilado, logrando una **reducción de más del 44% en el tiempo de procesamiento total** sin sacrificar precisión subpíxel ni alterar los algoritmos matemáticos de rechazo.
 
-### Visor Interactivo y Navegación
-- **Zoom 1:1 nativo con clic derecho:** Inspección instantánea al 100% de la resolución del sensor original mediante centrado exactamente en el cursor.
-- **Recorte nativo dinámico en el Revelador:** Al hacer zoom al 100% el sistema extrae y procesa bajo demanda la ventana exacta de la imagen completa de 32 bits, permitiendo evaluar el ruido real y la nitidez fina sin penalizar la velocidad de revelado.
+### Rendimiento y Paralelización
+- **Alineación concurrente de tomas (Lights):** La decodificación RAW (`rawpy`), detección de estrellas con ORB y homografía RANSAC ahora se ejecutan en paralelo mediante `ProcessPoolExecutor`. El tiempo medio por toma desciende de **2.76s a 1.28s**.
+- **Generación optimizada de Master Dark:** Se elimina la relectura redundante de archivos RAW en disco. Las tomas de calibración se procesan en memoria una única vez, reduciendo la fase de **27.3s a 6.3s (-77%)**.
+- **Control dinámico de concurrencia:** Selector configurable de hilos/procesos de CPU en la pestaña de Ajustes para balancear el consumo de memoria RAM y núcleos de la CPU.
+- **Conmutación real CPU / GPU CUDA:** Vinculación efectiva del backend de aceleración por hardware con la interfaz gráfica y el motor de integración.
 
-### Refinamiento del Revelador
-- **Reseteo automático de parámetros:** Al abrir un nuevo archivo o recibir el resultado de un apilado, todos los deslizadores, capas y valores de revelado se restablecen automáticamente a su estado neutro original.
-- **Mayor precisión en el balance de blancos:** Rango de temperatura y tinte ajustado facilitando una calibración tonal mucho más fina y controlada.
-- **Consola de registro siempre visible:** El panel de log del revelador queda fijado en la parte inferior de la columna izquierda para un seguimiento continuo de los procesos.
+### Correcciones y Estabilidad
+- Garantizada la composición final en memoria (`final_composite`) para evitar pérdidas de referencia previas al guardado TIFF.
+- Serialización de estructuras estelares para plena compatibilidad con el entorno de subprocesos (`spawn`) en Windows.
+- Telemetría de alta resolución integrada (`time.perf_counter()`) para desglose y trazabilidad de tiempos por fase.
 
+---
+**Benchmark de referencia (31 Lights + 4 Darks):**
+- v0.4.1: ~2m 28s
+- v0.5.0: ~1m 23s (~44% de reducción de tiempo)
 
 
 ## Características Principales
