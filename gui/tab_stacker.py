@@ -2,6 +2,8 @@
 import os
 import cv2
 import numpy as np
+import time
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QTabWidget, QListWidget, QListWidgetItem, QProgressBar,
@@ -16,6 +18,8 @@ from core.masking import refine_mask_guided
 from core.stacking import load_image_as_float32
 from gui.canvas import MaskCanvas
 from gui.worker import StackingWorker
+from core.gpu_backend import is_gpu_enabled
+from core.config_manager import load_config
 
 
 class FileListRow(QWidget):
@@ -536,7 +540,11 @@ class StackerTab(QWidget):
         out_path, _ = QFileDialog.getSaveFileName(
             self, "Guardar Resultado 32-bit", "resultado_dual_32bit.tiff", "TIFF (*.tiff *.tif)"
         )
-        if not out_path: return
+        if not out_path: 
+            return
+
+        # --- Iniciar temporizador ---
+        self.stack_start_time = time.perf_counter()
 
         self.last_stacked_output_path = out_path
         self.btn_run.setEnabled(False)
@@ -549,6 +557,9 @@ class StackerTab(QWidget):
         selected_lp_method = lp_methods[lp_mode_idx]
         selected_lp_strength = self.slider_stack_lp.value() / 100.0
 
+        app_cfg = load_config()
+        cpu_workers = int(app_cfg.get("cpu_workers", max(1, (os.cpu_count() or 4) - 1)))
+
         cfg = {
             "lights": self.lights_list,
             "darks": self.darks_list,
@@ -556,9 +567,10 @@ class StackerTab(QWidget):
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
             "kappa": self.spin_kappa.value(),
             "output_path": out_path,
-            # Nuevos parámetros antipolución en apilado
             "lp_method": selected_lp_method,
-            "lp_strength": selected_lp_strength
+            "lp_strength": selected_lp_strength,
+            "use_gpu": is_gpu_enabled(),
+            "cpu_workers": cpu_workers  
         }
 
         self.worker = StackingWorker(cfg)
@@ -570,6 +582,16 @@ class StackerTab(QWidget):
 
     def on_stack_success(self, path):
         self.btn_run.setEnabled(True)
+
+        # --- Cálculo y formateo del tiempo total ---
+        if hasattr(self, 'stack_start_time') and self.stack_start_time is not None:
+            elapsed = time.perf_counter() - self.stack_start_time
+            mins = int(elapsed // 60)
+            secs = elapsed % 60
+            time_str = f"{mins}m {secs:.1f}s" if mins > 0 else f"{secs:.2f}s"
+            self.log_message(f"[COMPLETADO] Tiempo total de apilado: {time_str}")
+            self.stack_start_time = None
+
         self.log_message(f"[COMPLETADO] Imagen guardada en: {path}")
         QMessageBox.information(
             self, "Éxito", 
@@ -579,8 +601,10 @@ class StackerTab(QWidget):
 
     def on_stack_error(self, err_msg):
         self.btn_run.setEnabled(True)
+        self.stack_start_time = None           # Resetea el cronómetro
         self.log_message(f"[ERROR CRÍTICO] {err_msg}")
         QMessageBox.critical(self, "Error durante el apilado", f"Ocurrió un error:\n{err_msg}")       
 
     def _on_stack_lp_changed(self, val: int):
         self.lbl_lp_str.setText(f"{val}%")
+        

@@ -3,9 +3,12 @@ import os
 import gc
 import shutil
 import tempfile
+import time
 import cv2
 import numpy as np
 import tifffile
+import multiprocessing as mp
+
 from PySide6.QtCore import QThread, Signal
 
 from core.stacking import (
@@ -15,18 +18,17 @@ from core.stacking import (
     stream_stack_auto,
     create_master_dark,
     calibrate_light,
-    preprocess_subframe_lp,          # <--- Nuevo import antipolución
-    HAS_GPU
+    preprocess_subframe_lp,          
+    HAS_GPU,
+    align_single_light_task,
+    save_frame_float32
 )
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+
 from core.graxpert_bridge import run_graxpert_background_extraction
 from core.starnet_bridge import run_starnet
-
-
-def save_frame_float32(filepath: str, img_float32: np.ndarray):
-    raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
-    with open(filepath, "wb") as f:
-        f.write(raw_data.tobytes())
-    del raw_data
 
 
 class StackingWorker(QThread):
@@ -53,25 +55,32 @@ class StackingWorker(QThread):
             kappa = float(self.config.get("kappa", 2.2))
             output_path = self.config.get("output_path", "resultado_dual_32bit.tiff")
 
-            # Parámetros antipolución procedentes de la UI
             lp_method = self.config.get("lp_method", "standard")
             lp_strength = float(self.config.get("lp_strength", 0.5))
+            use_gpu = self.config.get("use_gpu", True) and HAS_GPU
+            cpu_workers = int(self.config.get("cpu_workers", 4))
+
 
             if len(lights) < 2:
                 self.error_occurred.emit("Se necesitan al menos 2 tomas de luz para apilar.")
                 return
 
+
             self.status_changed.emit("Iniciando preparación del entorno temporal...")
             self.progress_changed.emit(2)
 
             temp_dir = tempfile.mkdtemp(prefix="astro_gui_")
-
+            # --- ETAPA 1: MASTER DARK ---
             master_dark = None
             if darks:
+                t0_darks = time.perf_counter()
                 self.status_changed.emit(f"Generando Master Dark a partir de {len(darks)} tomas...")
                 master_dark = create_master_dark(darks)
-                self.status_changed.emit("-> Master Dark generado y listo para calibración.")
+                dt_darks = time.perf_counter() - t0_darks
+                self.status_changed.emit(f"-> Master Dark completado en {dt_darks:.1f}s.")
 
+            # --- ETAPA 2: REFERENCIA Y DETECCIÓN BASE ---
+            t0_ref = time.perf_counter()
             ref_path = lights[0]
             self.status_changed.emit(f"Cargando toma de referencia: {os.path.basename(ref_path)}")
             
@@ -82,11 +91,8 @@ class StackingWorker(QThread):
                 sky_mask = cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_LINEAR)
 
             ref_sky = calibrate_light(ref_raw, master_dark)
-
-            # Estadísticas de referencia para Normalización Local
             ref_stats = {"median": np.median(ref_sky, axis=(0, 1))}
 
-            # Detección de estrellas sobre la referencia
             self.status_changed.emit("Extrayendo estrellas de la toma de referencia...")
             ref_kp, ref_desc, norm_type = detect_sky_stars(ref_sky, sky_mask=sky_mask)
             ref_gray = cv2.cvtColor((ref_sky * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
@@ -98,7 +104,6 @@ class StackingWorker(QThread):
             sky_temp_files = []
             ground_temp_files = []
 
-            # Aplicar antipolución subframe a la toma de referencia (si corresponde)
             ref_sky_processed = preprocess_subframe_lp(
                 ref_sky,
                 method=lp_method,
@@ -107,103 +112,82 @@ class StackingWorker(QThread):
                 ref_stats=ref_stats
             )
 
-            # Guardar referencia 0 para el cielo
-            p_sky_0 = os.path.join(temp_dir, "sky_0.bin")
+            p_sky_0 = os.path.join(temp_dir, "sky_0000.bin")
             save_frame_float32(p_sky_0, ref_sky_processed)
             sky_temp_files.append(p_sky_0)
 
-            # Guardar referencia 0 para el suelo (suelo original sin recortar)
             if mode == "fixed_tripod":
-                p_gnd_0 = os.path.join(temp_dir, "gnd_0.bin")
+                p_gnd_0 = os.path.join(temp_dir, "gnd_0000.bin")
                 save_frame_float32(p_gnd_0, ref_raw)
                 ground_temp_files.append(p_gnd_0)
 
             del ref_raw, ref_sky, ref_sky_processed
             gc.collect()
 
-            bf = cv2.BFMatcher(norm_type, crossCheck=False)
+            dt_ref = time.perf_counter() - t0_ref
+            self.status_changed.emit(f"-> Preparación de referencia completada en {dt_ref:.1f}s.")
+
+            # --- ETAPA 3: ALINEACIÓN PARALELA DE LIGHTS ---
+            t0_align = time.perf_counter()
             total_lights = len(lights)
             discarded_count = 0
 
+            # Convertir KeyPoints a tuplas (x, y) serializables en multiproceso
+            ref_kps_pts = [(kp.pt[0], kp.pt[1]) for kp in ref_kp]
+
+            tasks = []
             for idx, path in enumerate(lights[1:], start=2):
-                if self._is_cancelled:
-                    self.status_changed.emit("Cancelado por el usuario.")
-                    return
+                task_args = (
+                    idx, path, total_lights, temp_dir, mode, master_dark,
+                    ref_kps_pts, ref_desc, norm_type, ref_gray,
+                    w, h, sky_mask, lp_method, lp_strength, ref_stats
+                )
+                tasks.append(task_args)
 
-                pct = int(5 + (idx / total_lights) * 45)
-                self.progress_changed.emit(pct)
-                filename = os.path.basename(path)
+            aligned_results = []
+            completed_count = 0
+            ctx = mp.get_context("spawn")
 
-                raw_frame = load_image_as_float32(path)
-                calibrated_frame = calibrate_light(raw_frame, master_dark)
+            with ProcessPoolExecutor(max_workers=cpu_workers, mp_context=ctx) as executor:
+                futures = [executor.submit(align_single_light_task, t) for t in tasks]
 
-                try:
-                    curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
-                    if curr_desc is None or len(curr_kp) < 15:
-                        raise RuntimeError(f"Solo se detectaron {len(curr_kp) if curr_kp else 0} estrellas.")
+                for future in as_completed(futures):
+                    if self._is_cancelled:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        self.status_changed.emit("Cancelado por el usuario.")
+                        return
 
-                    matches = bf.knnMatch(ref_desc, curr_desc, k=2)
-                    good = [m for m, n in matches if len((m, n)) == 2 and m.distance < 0.78 * n.distance]
+                    completed_count += 1
+                    pct = int(5 + (completed_count / (total_lights - 1)) * 45)
+                    self.progress_changed.emit(pct)
 
-                    if len(good) < 10:
-                        raise RuntimeError(f"Correspondencias insuficientes con la referencia ({len(good)} pares).")
+                    res = future.result()
+                    aligned_results.append(res)
 
-                    curr_gray = cv2.cvtColor((calibrated_frame * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-                    dst_pts = refine_star_centroids(ref_gray, [ref_kp[m.queryIdx] for m in good])
-                    src_pts = refine_star_centroids(curr_gray, [curr_kp[m.trainIdx] for m in good])
+                    if res["success"]:
+                        self.status_changed.emit(
+                            f"[{res['idx']}/{total_lights}] {res['filename']} -> OK "
+                            f"({res['inliers']} inliers | Subpíxel | dx: {res['dx']:.1f}px, dy: {res['dy']:.1f}px)"
+                        )
+                    else:
+                        discarded_count += 1
+                        self.status_changed.emit(
+                            f"[DESCARTADA] [{res['idx']}/{total_lights}] {res['filename']} -> {res['error']}"
+                        )
 
-                    H_matrix, inliers = cv2.findHomography(
-                        src_pts, dst_pts,
-                        method=cv2.RANSAC,
-                        ransacReprojThreshold=2.0,
-                        maxIters=5000,
-                        confidence=0.995
-                    )
+            # Ordenar por índice para preservar el orden temporal de las tomas
+            aligned_results.sort(key=lambda r: r["idx"])
+            for res in aligned_results:
+                if res["success"]:
+                    sky_temp_files.append(res["p_sky"])
+                    if res["p_gnd"]:
+                        ground_temp_files.append(res["p_gnd"])
 
-                    if H_matrix is None:
-                        H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
-                        if H_aff is None:
-                            raise RuntimeError("Fallo RANSAC en homografía/afín.")
-                        H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
-
-                    num_inliers = int(np.sum(inliers)) if inliers is not None else 0
-
-                    warped = cv2.warpPerspective(
-                        calibrated_frame, H_matrix, (w, h),
-                        flags=cv2.INTER_CUBIC,
-                        borderMode=cv2.BORDER_REFLECT
-                    )
-
-                    # Preprocesar antipolución sobre el frame alineado antes de persistirlo
-                    warped_processed = preprocess_subframe_lp(
-                        warped,
-                        method=lp_method,
-                        strength=lp_strength,
-                        sky_mask=sky_mask,
-                        ref_stats=ref_stats
-                    )
-
-                    p_sky = os.path.join(temp_dir, f"sky_{idx-1}.bin")
-                    save_frame_float32(p_sky, warped_processed)
-                    sky_temp_files.append(p_sky)
-
-                    if mode == "fixed_tripod":
-                        p_gnd = os.path.join(temp_dir, f"gnd_{idx-1}.bin")
-                        save_frame_float32(p_gnd, raw_frame)
-                        ground_temp_files.append(p_gnd)
-
-                    dx, dy = H_matrix[0, 2], H_matrix[1, 2]
-                    self.status_changed.emit(
-                        f"[{idx}/{total_lights}] {filename} -> OK ({num_inliers} inliers | Subpíxel | dx: {dx:.1f}px, dy: {dy:.1f}px)"
-                    )
-                    del warped, warped_processed
-
-                except Exception as e:
-                    discarded_count += 1
-                    self.status_changed.emit(f"[DESCARTADA] [{idx}/{total_lights}] {filename} -> {e}")
-
-                del raw_frame, calibrated_frame
-                gc.collect()
+            dt_align = time.perf_counter() - t0_align
+            self.status_changed.emit(
+                f"-> Alineación paralela ({total_lights - 1} tomas con {cpu_workers} hilos): "
+                f"{dt_align:.1f}s (media efectiva: {dt_align / max(1, total_lights - 1):.2f}s/toma)."
+            )
 
             if discarded_count > 0:
                 self.status_changed.emit(f"-> Resumen: {discarded_count} toma(s) descartada(s).")
@@ -211,7 +195,8 @@ class StackingWorker(QThread):
             if len(sky_temp_files) < 2:
                 raise RuntimeError("No se pudieron alinear suficientes tomas con la referencia.")
 
-            backend_label = "GPU CUDA (NVIDIA)" if HAS_GPU else "CPU Multi-Core"
+            # --- ETAPA 4: INTEGRACIÓN MATEMÁTICA (CIELO Y SUELO) ---
+            backend_label = "GPU CUDA (NVIDIA)" if use_gpu else "CPU Multi-Core"
 
             if self._is_cancelled: return
             self.status_changed.emit(
@@ -219,22 +204,39 @@ class StackingWorker(QThread):
             )
             self.progress_changed.emit(55)
 
-            # Integración del cielo (soporta rechazo Min-Sigma si fue el método seleccionado)
+            t0_stack_sky = time.perf_counter()
             sky_stacked = stream_stack_auto(
                 sky_temp_files, 
                 (h, w, c), 
                 chunk_rows=800, 
                 kappa=kappa,
                 lp_method=lp_method,
-                lp_strength=lp_strength
+                lp_strength=lp_strength,
+                use_gpu=use_gpu
             )
+            dt_stack_sky = time.perf_counter() - t0_stack_sky
+            self.status_changed.emit(f"-> Apilado de cielo finalizado en {dt_stack_sky:.1f}s.")
+
+            final_composite = sky_stacked
 
             if sky_mask is not None and mode == "fixed_tripod":
                 if self._is_cancelled: return
                 self.status_changed.emit(f"Apilando Suelo ({len(ground_temp_files)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
                 self.progress_changed.emit(75)
-                ground_stacked = stream_stack_auto(ground_temp_files, (h, w, c), chunk_rows=800, kappa=kappa)
 
+                t0_stack_gnd = time.perf_counter()
+                ground_stacked = stream_stack_auto(
+                    ground_temp_files, 
+                    (h, w, c), 
+                    chunk_rows=800, 
+                    kappa=kappa,
+                    use_gpu=use_gpu
+                )
+                dt_stack_gnd = time.perf_counter() - t0_stack_gnd
+                self.status_changed.emit(f"-> Apilado de suelo finalizado en {dt_stack_gnd:.1f}s.")
+
+                # --- ETAPA 5: COMPOSICIÓN Y BLENDING ---
+                t0_comp = time.perf_counter()
                 self.status_changed.emit("Componiendo imagen final de 32 bits con máscara suavizada...")
                 self.progress_changed.emit(92)
 
@@ -245,10 +247,15 @@ class StackingWorker(QThread):
                 mask_3d = np.repeat(smooth_mask[..., np.newaxis], 3, axis=2)
 
                 final_composite = (sky_stacked * mask_3d) + (ground_stacked * (1.0 - mask_3d))
-                del sky_stacked, ground_stacked, mask_3d, smooth_mask
-            else:
-                final_composite = sky_stacked
+                del ground_stacked, mask_3d, smooth_mask
+                dt_comp = time.perf_counter() - t0_comp
+                self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
 
+            if final_composite is not sky_stacked:
+                del sky_stacked
+
+            # --- ETAPA 6: ESCRITURA EN DISCO ---
+            t0_io = time.perf_counter()
             self.status_changed.emit(f"Guardando resultado de 32 bits en: {output_path}...")
             if os.path.exists(output_path):
                 try:
@@ -257,12 +264,17 @@ class StackingWorker(QThread):
                     pass
 
             tifffile.imwrite(output_path, final_composite.astype(np.float32), compression='zlib')
+            dt_io = time.perf_counter() - t0_io
+            self.status_changed.emit(f"-> Guardado TIFF completado en {dt_io:.1f}s.")
 
             self.progress_changed.emit(100)
             self.status_changed.emit("¡Apilado completado exitosamente!")
             self.finished_success.emit(output_path)
 
         except Exception as exc:
+            import traceback
+            print(f"\n[EXCEPCION EN WORKER]: {exc}", flush=True)
+            traceback.print_exc()
             self.error_occurred.emit(str(exc))
         finally:
             if temp_dir and os.path.exists(temp_dir):

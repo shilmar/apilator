@@ -8,6 +8,9 @@ import tifffile
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from astropy.io import fits
+from core.gpu_backend import is_gpu_enabled
+
+
 
 try:
     import cupy as cp
@@ -59,26 +62,32 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
 
 
 def create_master_dark(dark_paths: list) -> np.ndarray:
+    """
+    Genera el Master Dark calculando la mediana de los cuadros de calibración.
+    Carga cada cuadro RAW a memoria una sola vez para eliminar lecturas redundantes.
+    """
     if not dark_paths:
         return None
 
-    first = load_image_as_float32(dark_paths[0])
-    h, w, c = first.shape
-    del first
+    # Cargar cada dark una única vez en memoria
+    loaded_darks = []
+    for path in dark_paths:
+        img = load_image_as_float32(path)
+        loaded_darks.append(img)
 
-    chunk_rows = 1000
-    master_dark = np.zeros((h, w, c), dtype=np.float32)
+    # Si solo hay un dark, se devuelve directamente sin calcular mediana
+    if len(loaded_darks) == 1:
+        return loaded_darks[0]
 
-    for y in range(0, h, chunk_rows):
-        y_end = min(y + chunk_rows, h)
-        chunks = []
-        for path in dark_paths:
-            img = load_image_as_float32(path)
-            chunks.append(img[y:y_end, :, :])
-            del img
-        master_dark[y:y_end, :, :] = np.median(np.stack(chunks, axis=0), axis=0)
-        del chunks
-        gc.collect()
+    # Apilar en un array 4D: (N, H, W, C)
+    stack = np.stack(loaded_darks, axis=0)
+    del loaded_darks
+    gc.collect()
+
+    # Cálculo directo de la mediana a lo largo del eje temporal
+    master_dark = np.median(stack, axis=0).astype(np.float32)
+    del stack
+    gc.collect()
 
     return master_dark
 
@@ -380,11 +389,17 @@ def stream_stack_auto(
     chunk_rows: int = 1000, 
     kappa: float = 2.2,
     lp_method: str = "standard",
-    lp_strength: float = 0.5
+    lp_strength: float = 0.5,
+    use_gpu: bool = None
 ) -> np.ndarray:
     h, w, c = shape
 
-    if HAS_GPU:
+    # Si no se pasa explícitamente, consulta el backend global
+    if use_gpu is None:
+        use_gpu = is_gpu_enabled()
+
+    # Solo usa GPU si la tarjeta está disponible Y el usuario no la ha desactivado
+    if use_gpu and HAS_GPU:
         try:
             stacked_out = np.zeros((h, w, c), dtype=np.float32)
             bytes_per_row = w * c * 4
@@ -416,7 +431,8 @@ def stream_stack_auto(
                 del sub_stack
 
             return stacked_out
-        except Exception:
+        except Exception as e:
+            # Fallback a CPU en caso de desbordamiento de VRAM u otro error en GPU
             pass
 
     return parallel_stream_stack(
@@ -427,3 +443,105 @@ def stream_stack_auto(
         lp_method=lp_method,
         lp_strength=lp_strength
     )
+    
+# Añadir al final de core/stacking.py
+
+def align_single_light_task(args: tuple) -> dict:
+    """
+    Tarea aislada para ProcessPoolExecutor: procesa y alinea un cuadro de luz contra la referencia.
+    """
+    (
+        idx, path, total_lights, temp_dir, mode, master_dark,
+        ref_kps_pts, ref_desc, norm_type, ref_gray,
+        w, h, sky_mask, lp_method, lp_strength, ref_stats
+    ) = args
+
+    filename = os.path.basename(path)
+    res = {
+        "idx": idx,
+        "filename": filename,
+        "success": False,
+        "error": None,
+        "p_sky": None,
+        "p_gnd": None,
+        "inliers": 0,
+        "dx": 0.0,
+        "dy": 0.0
+    }
+
+    try:
+        raw_frame = load_image_as_float32(path)
+        calibrated_frame = calibrate_light(raw_frame, master_dark)
+
+        curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
+        if curr_desc is None or len(curr_kp) < 15:
+            raise RuntimeError(f"Solo se detectaron {len(curr_kp) if curr_kp else 0} estrellas.")
+
+        bf = cv2.BFMatcher(norm_type, crossCheck=False)
+        matches = bf.knnMatch(ref_desc, curr_desc, k=2)
+        good = [m for m, n in matches if len((m, n)) == 2 and m.distance < 0.78 * n.distance]
+
+        if len(good) < 10:
+            raise RuntimeError(f"Correspondencias insuficientes con la referencia ({len(good)} pares).")
+
+        curr_gray = cv2.cvtColor((calibrated_frame * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        dst_pts = refine_star_centroids(ref_gray, [cv2.KeyPoint(pt[0], pt[1], 1) for pt in [ref_kps_pts[m.queryIdx] for m in good]])
+        src_pts = refine_star_centroids(curr_gray, [curr_kp[m.trainIdx] for m in good])
+
+        H_matrix, inliers = cv2.findHomography(
+            src_pts, dst_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=2.0,
+            maxIters=5000,
+            confidence=0.995
+        )
+
+        if H_matrix is None:
+            H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+            if H_aff is None:
+                raise RuntimeError("Fallo RANSAC en homografía/afín.")
+            H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
+
+        num_inliers = int(np.sum(inliers)) if inliers is not None else 0
+
+        warped = cv2.warpPerspective(
+            calibrated_frame, H_matrix, (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REFLECT
+        )
+
+        warped_processed = preprocess_subframe_lp(
+            warped,
+            method=lp_method,
+            strength=lp_strength,
+            sky_mask=sky_mask,
+            ref_stats=ref_stats
+        )
+
+        p_sky = os.path.join(temp_dir, f"sky_{idx-1}.bin")
+        save_frame_float32(p_sky, warped_processed)
+        res["p_sky"] = p_sky
+
+        if mode == "fixed_tripod":
+            p_gnd = os.path.join(temp_dir, f"gnd_{idx-1}.bin")
+            save_frame_float32(p_gnd, raw_frame)
+            res["p_gnd"] = p_gnd
+
+        res["success"] = True
+        res["inliers"] = num_inliers
+        res["dx"] = float(H_matrix[0, 2])
+        res["dy"] = float(H_matrix[1, 2])
+
+        del warped, warped_processed, raw_frame, calibrated_frame
+        gc.collect()
+
+    except Exception as exc:
+        res["error"] = str(exc)
+
+    return res
+    
+def save_frame_float32(filepath: str, img_float32: np.ndarray):
+    raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
+    with open(filepath, "wb") as f:
+        f.write(raw_data.tobytes())
+    del raw_data

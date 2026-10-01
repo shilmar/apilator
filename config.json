@@ -3,5 +3,7 @@
     "graxpert_smoothing": 0.5,
     "default_kappa": 2.2,
     "preview_max_dim": 1500,
-    "export_format_default": "TIFF 16-bit (*.tif *.tiff)"
+    "export_format_default": "TIFF 16-bit (*.tif *.tiff)",
+    "use_gpu": true,
+    "cpu_workers": 4
 }

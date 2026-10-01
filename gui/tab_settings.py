@@ -3,14 +3,18 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, 
     QLineEdit, QPushButton, QFileDialog, QMessageBox, QDoubleSpinBox,
-    QSpinBox
+    QSpinBox, QCheckBox
 )
 from core.config_manager import load_config, save_config
+from core.gpu_backend import is_cupy_installed, is_gpu_enabled, set_gpu_enabled, get_gpu_name
+
 
 class SettingsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cfg = load_config()
+        user_wants_gpu = self.cfg.get("use_gpu", True)
+        set_gpu_enabled(user_wants_gpu)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -18,7 +22,7 @@ class SettingsTab(QWidget):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # Grupo: Rutas de Herramientas Externas
+        # 1. Grupo: Rutas de Herramientas Externas
         grp_paths = QGroupBox("Rutas de Herramientas Externas")
         paths_layout = QVBoxLayout(grp_paths)
         paths_layout.setSpacing(10)
@@ -37,8 +41,8 @@ class SettingsTab(QWidget):
 
         main_layout.addWidget(grp_paths)
 
-        # Grupo: Valores por Defecto de Procesado
-        grp_defaults = QGroupBox("Parámetros Generales y Rendimiento")
+        # 2. Grupo: Valores por Defecto de Procesado
+        grp_defaults = QGroupBox("Parámetros Generales")
         def_layout = QVBoxLayout(grp_defaults)
         def_layout.setSpacing(10)
 
@@ -66,7 +70,44 @@ class SettingsTab(QWidget):
 
         main_layout.addWidget(grp_defaults)
 
-        # Botón Guardar
+        # 3. Grupo: Rendimiento y Aceleración por Hardware (GPU)
+        grp_perf = QGroupBox("Rendimiento y Aceleración por Hardware")
+        layout_perf = QVBoxLayout(grp_perf)
+
+        self.chk_gpu = QCheckBox("Aceleración por GPU (CUDA / CuPy)")
+        if is_cupy_installed():
+            self.chk_gpu.setChecked(is_gpu_enabled())
+            gpu_name = get_gpu_name()
+            self.chk_gpu.setText(f"Aceleración por GPU activada ({gpu_name})")
+            self.chk_gpu.toggled.connect(self.on_gpu_toggled)
+        else:
+            self.chk_gpu.setChecked(False)
+            self.chk_gpu.setEnabled(False)
+            self.chk_gpu.setText("Aceleración por GPU no disponible (CuPy / CUDA no detectados - CPU forzada)")
+
+        layout_perf.addWidget(self.chk_gpu)
+        
+        # Dentro del grupo grp_perf:
+        row_cpu = QHBoxLayout()
+        row_cpu.addWidget(QLabel("Hilos / Procesos simultáneos de CPU:"))
+
+        total_cores = os.cpu_count() or 4
+        # Valor recomendado por defecto: la mitad de los núcleos o máximo 4-6 para equilibrar RAM y velocidad
+        default_workers = max(1, min(total_cores - 1, 4))
+
+        self.spin_cpu_workers = QSpinBox()
+        self.spin_cpu_workers.setRange(1, total_cores)
+        self.spin_cpu_workers.setValue(int(self.cfg.get("cpu_workers", default_workers)))
+        self.spin_cpu_workers.setToolTip(f"Hilos concurrentes para descompresión RAW y alineación (Detectados: {total_cores})")
+
+        row_cpu.addWidget(self.spin_cpu_workers)
+        row_cpu.addStretch()
+        layout_perf.addLayout(row_cpu)
+        
+        # <-- AQUÍ ESTABA EL DETALLE QUE FALTABA:
+        main_layout.addWidget(grp_perf)
+
+        # 4. Botón Guardar
         btn_save = QPushButton("Guardar Cambios de Configuración")
         btn_save.setFixedHeight(40)
         btn_save.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
@@ -87,5 +128,10 @@ class SettingsTab(QWidget):
         self.cfg["starnet_exe"] = self.txt_starnet.text().strip()
         self.cfg["default_kappa"] = self.spin_kappa.value()
         self.cfg["preview_max_dim"] = self.spin_proxy.value()
+        self.cfg["use_gpu"] = self.chk_gpu.isChecked()
+        self.cfg["cpu_workers"] = self.spin_cpu_workers.value()
         save_config(self.cfg)
         QMessageBox.information(self, "Ajustes", "Configuración guardada correctamente en config.json.")
+        
+    def on_gpu_toggled(self, checked: bool):
+        set_gpu_enabled(checked)
