@@ -497,3 +497,81 @@ def apply_dehaze(img_rgb: np.ndarray, strength: float = 0.0) -> np.ndarray:
         out = img_rgb * (1.0 - factor) + haze_map[..., np.newaxis] * factor
 
     return np.clip(out, 0.0, 1.0).astype(np.float32)
+    
+def descomponer_ondiculas(imagen: np.ndarray, niveles: int = 5) -> tuple[list[np.ndarray], np.ndarray]:
+    """
+    Descompone la imagen en planos de detalle por ondículas (filtros dilatados)
+    usando un núcleo B-Spline cúbico separable.
+    """
+    nucleo_base = np.array([0.0625, 0.25, 0.375, 0.25, 0.0625], dtype=np.float32)
+    actual = imagen.copy()
+    planos_detalle = []
+
+    for nivel in range(niveles):
+        salto = 2 ** nivel
+        longitud_k = 4 * salto + 1
+        k1d = np.zeros(longitud_k, dtype=np.float32)
+        for i, val in enumerate(nucleo_base):
+            k1d[i * salto] = val
+
+        # Filtrado paso bajo separable
+        paso_bajo = cv2.sepFilter2D(actual, -1, k1d, k1d, borderType=cv2.BORDER_REFLECT)
+        
+        # El detalle es la resta entre la escala actual y la suavizada
+        detalle = actual - paso_bajo
+        planos_detalle.append(detalle)
+        actual = paso_bajo
+
+    # 'actual' contiene la capa residual de frecuencia ultra-baja (fondo y cúpula)
+    return planos_detalle, actual
+
+
+def realce_multiescala_ondiculas(
+    imagen_rgb: np.ndarray,
+    fuerza_estructura: float = 0.0,
+    reduccion_fondo: float = 0.0,
+    sky_mask: np.ndarray = None
+) -> np.ndarray:
+    """
+    Aplica realce de estructuras de gas/polvo y atenuación de cúpula residual.
+    fuerza_estructura: -1.0 a +1.0 (escalas intermedias)
+    reduccion_fondo: 0.0 a 1.0 (capa residual de fondo)
+    """
+    if abs(fuerza_estructura) < 1e-4 and reduccion_fondo < 1e-4:
+        return imagen_rgb
+
+    # Descomposición en 5 niveles de escala
+    detalles, residual = descomponer_ondiculas(imagen_rgb, niveles=5)
+
+    # 1. Modulación de detalles: las escalas 3 y 4 corresponden a las nebulosas y polvo
+    # Se aplica una ganancia suave progresiva
+    pesos = [
+        1.0,                                    # Escala 1 (ruido / micro-estrellas)
+        1.0,                                    # Escala 2 (estrellas pequeñas)
+        1.0 + fuerza_estructura * 0.4,          # Escala 3 (transiciones de gas)
+        1.0 + fuerza_estructura * 0.8,          # Escala 4 (filamentos de la Vía Láctea)
+        1.0 + fuerza_estructura * 0.6           # Escala 5 (carriles anchos de polvo)
+    ]
+
+    # Reconstrucción de la suma de detalles
+    suma_detalles = np.zeros_like(imagen_rgb)
+    for d, peso in zip(detalles, pesos):
+        suma_detalles += d * peso
+
+    # 2. Atenuación del plano residual (la cúpula fija)
+    if reduccion_fondo > 1e-4:
+        pedestal = np.percentile(residual, 5, axis=(0, 1))
+        residual_atenuado = residual - (residual - pedestal) * (reduccion_fondo * 0.5)
+        residual = residual_atenuado
+
+    reconstruida = np.clip(suma_detalles + residual, 0.0, 1.0)
+
+    # Si hay máscara de cielo, aplicamos selectivamente
+    if sky_mask is not None:
+        h, w = imagen_rgb.shape[:2]
+        m = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+        if m.ndim == 2:
+            m = m[..., np.newaxis]
+        return np.clip(reconstruida * m + imagen_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
+
+    return reconstruida.astype(np.float32)

@@ -10,7 +10,7 @@ from gui.tab_settings import SettingsTab
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Apilator - Astrofotografía de Paisaje (v0.3.2)")
+        self.setWindowTitle("Apilator - Astrofotografía de Paisaje (v0.4.1)")
         self.resize(1360, 880)
 
         self._setup_ui()

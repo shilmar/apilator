@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QTabWidget, QListWidget, QListWidgetItem, QProgressBar,
     QMessageBox, QGroupBox, QRadioButton, QSlider, QDoubleSpinBox,
-    QComboBox, QSplitter, QTextEdit, QSizePolicy, QCheckBox
+    QComboBox, QSplitter, QTextEdit, QSizePolicy, QCheckBox, QSpinBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCursor, QColor
@@ -184,10 +184,17 @@ class StackerTab(QWidget):
         grp_mask = QGroupBox("Máscara Cielo / Suelo")
         mask_layout = QVBoxLayout(grp_mask)
 
-        self.chk_show_mask = QCheckBox("Mostrar Máscara en Visor")
+        row_mask_toggles = QHBoxLayout()
+        self.chk_show_mask = QCheckBox("Mostrar Máscara")
         self.chk_show_mask.setChecked(True)
         self.chk_show_mask.toggled.connect(self.canvas.set_mask_visible)
-        mask_layout.addWidget(self.chk_show_mask)
+        row_mask_toggles.addWidget(self.chk_show_mask)
+
+        self.chk_show_strokes = QCheckBox("Mostrar Trazos")
+        self.chk_show_strokes.setChecked(True)
+        self.chk_show_strokes.toggled.connect(self.canvas.set_scribbles_visible)
+        row_mask_toggles.addWidget(self.chk_show_strokes)
+        mask_layout.addLayout(row_mask_toggles)
 
         self.rb_sky = QRadioButton("Pintar Cielo (Verde)")
         self.rb_ground = QRadioButton("Pintar Suelo (Rojo)")
@@ -203,6 +210,22 @@ class StackerTab(QWidget):
         self.slider_brush.setValue(20)
         self.slider_brush.valueChanged.connect(self.update_brush_slider)
         mask_layout.addWidget(self.slider_brush)
+
+        # Controles finos de Refinamiento
+        row_params = QHBoxLayout()
+        row_params.addWidget(QLabel("Suavizado Borde:"))
+        self.spin_feather = QSpinBox()
+        self.spin_feather.setRange(1, 31)
+        self.spin_feather.setSingleStep(2)
+        self.spin_feather.setValue(7)
+        row_params.addWidget(self.spin_feather)
+
+        row_params.addWidget(QLabel("Pasos:"))
+        self.spin_iter = QSpinBox()
+        self.spin_iter.setRange(1, 8)
+        self.spin_iter.setValue(3)
+        row_params.addWidget(self.spin_iter)
+        mask_layout.addLayout(row_params)
 
         btn_mask_actions = QHBoxLayout()
         btn_refine = QPushButton("Refinar Automática")
@@ -223,7 +246,7 @@ class StackerTab(QWidget):
         btn_mask_io.addWidget(btn_save_m)
         mask_layout.addLayout(btn_mask_io)
         left_layout.addWidget(grp_mask)
-
+        
         # SECCIÓN 5: Registro y Ejecución
         left_layout.addWidget(QLabel("Registro de Actividad:"))
         self.txt_log = QTextEdit()
@@ -375,11 +398,24 @@ class StackerTab(QWidget):
         if self.canvas.orig_rgb is None:
             QMessageBox.warning(self, "Aviso", "Abre primero una toma base.")
             return
-        self.log_message("Refinando máscara cielo/suelo...")
+        
         scribbles = self.canvas.get_scribbles_matrix()
-        self.computed_mask = refine_mask_guided(self.canvas.orig_rgb, scribbles)
+        if scribbles is None or not (np.any(scribbles == 1) and np.any(scribbles == 2)):
+            QMessageBox.warning(self, "Aviso", "Debes pintar al menos un trazo verde (cielo) y uno rojo (suelo).")
+            return
+
+        self.log_message("Refinando máscara cielo/suelo...")
+        feather = self.spin_feather.value()
+        iters = self.spin_iter.value()
+        
+        self.computed_mask = refine_mask_guided(
+            self.canvas.orig_rgb, 
+            scribbles,
+            feather_radius=feather,
+            iterations=iters
+        )
         self.canvas.set_refined_mask(self.computed_mask)
-        self.log_message("Máscara refinada con éxito.")
+        self.log_message(f"Máscara refinada con éxito (Borde: {feather}px, Pasos: {iters}).")
 
     def clear_mask(self):
         """Elimina todos los trazos y la máscara calculada para empezar de cero."""

@@ -4,10 +4,22 @@ import cv2
 import numpy as np
 import tifffile
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFileDialog, QMessageBox, QGroupBox, QSlider, QSplitter,
-    QDoubleSpinBox, QTextEdit, QComboBox, QSpinBox,
-    QScrollArea, QFrame
+    QWidget, 
+    QVBoxLayout, 
+    QHBoxLayout, 
+    QPushButton, 
+    QLabel,
+    QFileDialog, 
+    QMessageBox, 
+    QGroupBox, 
+    QSlider, 
+    QSplitter,
+    QDoubleSpinBox, 
+    QTextEdit, 
+    QComboBox, 
+    QSpinBox,
+    QScrollArea, 
+    QFrame
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
@@ -24,7 +36,8 @@ from core.stretch import (
     apply_denoise,
     apply_clarity,
     apply_dehaze,
-    apply_curve_lut
+    apply_curve_lut,
+    realce_multiescala_ondiculas
 )
 from gui.widgets.curve_widget import CurveWidget
 from gui.canvas import MaskCanvas
@@ -48,6 +61,12 @@ class DeveloperTab(QWidget):
         self.active_filepath = None
         self.gx_worker = None
         self.sn_worker = None
+        
+        self.is_zoomed_100 = False
+        self.zoom_rel_coords = (0.5, 0.5)
+        
+        self.multiescala_estructura = 0.0   # -1.0 a +1.0
+        self.multiescala_fondo = 0.0        # 0.0 a 1.0
 
         self.lp_reduction = 0.0  # Rango 0.0 a 1.0 (Reducción contaminación lumínica)
         self.clarity_starless_val = 0.0
@@ -79,8 +98,10 @@ class DeveloperTab(QWidget):
 
         # 1. Visor interactivo
         self.canvas = MaskCanvas(self, enable_masking=False)
+        self.canvas.external_zoom_handler = True
+        self.canvas.zoom_toggled.connect(self.on_canvas_zoom_toggled)
 
-        # 2. Panel interno de controles
+        # 2. Panel interno de controles (irá dentro del scroll)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(10, 10, 10, 10)
@@ -139,7 +160,6 @@ class DeveloperTab(QWidget):
         grp_starnet = QGroupBox("StarNet++ AI - Control de Estrellas")
         layout_starnet = QVBoxLayout(grp_starnet)
 
-        # Configuración y botón de ejecución
         row_sn = QHBoxLayout()
         row_sn.addWidget(QLabel("Paso:"))
         self.spin_stride = QSpinBox()
@@ -153,7 +173,6 @@ class DeveloperTab(QWidget):
         row_sn.addWidget(self.btn_starnet)
         layout_starnet.addLayout(row_sn)
 
-        # Capa visible
         row_view = QHBoxLayout()
         row_view.addWidget(QLabel("Capa visible:"))
         self.combo_layer = QComboBox()
@@ -163,7 +182,6 @@ class DeveloperTab(QWidget):
         row_view.addWidget(self.combo_layer)
         layout_starnet.addLayout(row_view)
 
-        # Intensidad de Estrellas
         row_stars = QHBoxLayout()
         row_stars.addWidget(QLabel("Intensidad Estrellas:"))
         self.lbl_stars = QLabel("100%")
@@ -177,7 +195,6 @@ class DeveloperTab(QWidget):
         self.slider_stars.valueChanged.connect(self.on_stars_slider_changed)
         layout_starnet.addWidget(self.slider_stars)
 
-        # Contraste Fondo (Starless)
         row_cs = QHBoxLayout()
         row_cs.addWidget(QLabel("Contraste Fondo (Starless):"))
         self.lbl_contrast_starless = QLabel("0.00")
@@ -191,7 +208,6 @@ class DeveloperTab(QWidget):
         self.slider_contrast_starless.valueChanged.connect(self.on_contrast_starless_changed)
         layout_starnet.addWidget(self.slider_contrast_starless)
 
-        # Claridad (Starless)
         row_clarity = QHBoxLayout()
         row_clarity.addWidget(QLabel("Claridad Fondo:"))
         self.lbl_clarity = QLabel("0.00")
@@ -205,7 +221,6 @@ class DeveloperTab(QWidget):
         self.slider_clarity.valueChanged.connect(self.on_clarity_changed)
         layout_starnet.addWidget(self.slider_clarity)
 
-        # Borrar Neblina (Dehaze Starless)
         row_dehaze = QHBoxLayout()
         row_dehaze.addWidget(QLabel("Borrar Neblina:"))
         self.lbl_dehaze = QLabel("0.00")
@@ -220,6 +235,38 @@ class DeveloperTab(QWidget):
         layout_starnet.addWidget(self.slider_dehaze)
 
         left_layout.addWidget(grp_starnet)
+        
+        # --- Realce Multiescala por Ondículas ---
+        grp_ondiculas = QGroupBox("Estructura Multiescala (Ondículas)")
+        layout_ondiculas = QVBoxLayout(grp_ondiculas)
+
+        row_ond_est = QHBoxLayout()
+        row_ond_est.addWidget(QLabel("Estructura Galáctica:"))
+        self.lbl_ond_est = QLabel("0.00")
+        row_ond_est.addWidget(self.lbl_ond_est)
+        layout_ondiculas.addLayout(row_ond_est)
+
+        self.slider_ond_est = QSlider(Qt.Horizontal)
+        self.slider_ond_est.setRange(-100, 100)
+        self.slider_ond_est.setValue(0)
+        self.slider_ond_est.setEnabled(False)
+        self.slider_ond_est.valueChanged.connect(self.on_ond_estructura_changed)
+        layout_ondiculas.addWidget(self.slider_ond_est)
+
+        row_ond_bg = QHBoxLayout()
+        row_ond_bg.addWidget(QLabel("Atenuar Fondo Residual:"))
+        self.lbl_ond_bg = QLabel("0%")
+        row_ond_bg.addWidget(self.lbl_ond_bg)
+        layout_ondiculas.addLayout(row_ond_bg)
+
+        self.slider_ond_bg = QSlider(Qt.Horizontal)
+        self.slider_ond_bg.setRange(0, 100)
+        self.slider_ond_bg.setValue(0)
+        self.slider_ond_bg.setEnabled(False)
+        self.slider_ond_bg.valueChanged.connect(self.on_ond_fondo_changed)
+        layout_ondiculas.addWidget(self.slider_ond_bg)
+
+        left_layout.addWidget(grp_ondiculas)
         
         # --- Reducción de Ruido (Denoise) ---
         grp_dn = QGroupBox("Reducción de Ruido (Fondo)")
@@ -268,7 +315,7 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_curves)
               
-        # Módulo Balance de Blancos (Control Fino +-0.500)
+        # Módulo Balance de Blancos
         grp_wb = QGroupBox("Balance de Blancos (Precisión Fina)")
         wb_layout = QVBoxLayout(grp_wb)
         wb_layout.setSpacing(3)
@@ -279,9 +326,8 @@ class DeveloperTab(QWidget):
         row_temp.addWidget(self.lbl_temp_val)
         wb_layout.addLayout(row_temp)
 
-        # Rango -500 a +500 mapeado a -0.500 a +0.500
         self.slider_temp = QSlider(Qt.Horizontal)
-        self.slider_temp.setRange(-500, 500)
+        self.slider_temp.setRange(-250, 250)
         self.slider_temp.setValue(0)
         self.slider_temp.valueChanged.connect(self.on_temp_changed)
         wb_layout.addWidget(self.slider_temp)
@@ -293,7 +339,7 @@ class DeveloperTab(QWidget):
         wb_layout.addLayout(row_tint)
 
         self.slider_tint = QSlider(Qt.Horizontal)
-        self.slider_tint.setRange(-500, 500)
+        self.slider_tint.setRange(-250, 250)
         self.slider_tint.setValue(0)
         self.slider_tint.valueChanged.connect(self.on_tint_changed)
         wb_layout.addWidget(self.slider_tint)
@@ -332,7 +378,6 @@ class DeveloperTab(QWidget):
         self.slider_sat_gnd.valueChanged.connect(self.on_sat_gnd_changed)
         sat_layout.addWidget(self.slider_sat_gnd)
 
-        # Control Vibrance
         row_vib = QHBoxLayout()
         row_vib.addWidget(QLabel("Intensidad (Vibrance):"))
         self.lbl_vibrance = QLabel("0.00")
@@ -393,7 +438,6 @@ class DeveloperTab(QWidget):
         self.slider_mtf.valueChanged.connect(self.on_slider_mtf_changed)
         stretch_layout.addWidget(self.slider_mtf)
 
-        # Control Contraste
         row_cnt = QHBoxLayout()
         row_cnt.addWidget(QLabel("Contraste:"))
         self.lbl_contrast = QLabel("0.00")
@@ -417,30 +461,14 @@ class DeveloperTab(QWidget):
         btn_export.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
         btn_export.clicked.connect(self.export_image)
         left_layout.addWidget(btn_export)
-
-        # Registro
-        left_layout.addWidget(QLabel("Registro del Revelador:"))
-        self.txt_log = QTextEdit()
-        self.txt_log.setReadOnly(True)
-        self.txt_log.setFixedHeight(95)
-        self.txt_log.setStyleSheet(
-            "background-color: #141414; color: #d0d0d0; "
-            "font-family: Consolas, monospace; font-size: 11px; "
-            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
-        )
-        left_layout.addWidget(self.txt_log)
         left_layout.addStretch()
 
-        # Configuración Scroll
+        # Configuración Scroll para la zona de controles
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll_area.setWidget(left_panel)
-
-        scroll_area.setMinimumWidth(380)
-        scroll_area.setMaximumWidth(450)
-
         scroll_area.setStyleSheet("""
             QScrollArea {
                 border: none;
@@ -465,10 +493,40 @@ class DeveloperTab(QWidget):
             }            
         """)
 
-        splitter.addWidget(scroll_area)
+        # Contenedor Izquierdo Principal (Scroll de controles arriba + Log estático abajo)
+        left_container = QWidget()
+        left_container_layout = QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.setSpacing(6)
+        left_container.setMinimumWidth(380)
+        left_container.setMaximumWidth(520)
+
+        # Scroll arriba con factor de expansión 1
+        left_container_layout.addWidget(scroll_area, 1)
+
+        # Log fijo abajo (sin factor de expansión)
+        lbl_log = QLabel("Registro del Revelador:")
+        lbl_log.setStyleSheet("font-weight: bold; font-size: 11px; margin-left: 10px; margin-top: 4px;")
+        left_container_layout.addWidget(lbl_log, 0)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFixedHeight(150)
+        self.txt_log.setStyleSheet(
+            "background-color: #141414; color: #d0d0d0; "
+            "font-family: Consolas, monospace; font-size: 11px; "
+            "border: 1px solid #333333; border-radius: 4px; padding: 4px; "
+            "margin-left: 10px; margin-right: 10px; margin-bottom: 10px;"
+        )
+        left_container_layout.addWidget(self.txt_log, 0)
+
+        splitter.addWidget(left_container)
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 10)
+        
+        splitter.setSizes([450, 1400])
+        
         layout.addWidget(splitter)
 
     def log_message(self, text: str):
@@ -540,6 +598,9 @@ class DeveloperTab(QWidget):
         self.image_stars = None
         self.combo_layer.setEnabled(False)
         self.slider_stars.setEnabled(False)
+        
+        self.reset_all_parameters()
+        
         self.log_message(f"Cargando imagen: {os.path.basename(filepath)}...")
         self.slider_contrast_starless.setEnabled(False)
         self.slider_contrast_starless.setValue(0)
@@ -548,6 +609,8 @@ class DeveloperTab(QWidget):
         if hasattr(self, 'curve_widget'):
             self.curve_widget.reset_curve()
         self.combo_denoise.setEnabled(False)
+        self.slider_ond_est.setEnabled(False)
+        self.slider_ond_bg.setEnabled(False)
         
         try:
             self.image_32bit = load_image_as_float32(filepath)
@@ -573,7 +636,12 @@ class DeveloperTab(QWidget):
             self.load_image_direct(p)
 
     # --- Composición Dinámica de Capas ---
-    def _compose_active_base(self, for_export: bool = False) -> np.ndarray:
+    def _compose_active_base(self, for_export: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Retorna (base_a_procesar, mascara_correspondiente).
+        Si no es exportación y el zoom 100% está activo, recorta la región nativa
+        del sensor que cabe en el tamaño actual del canvas.
+        """
         if for_export:
             starless, stars, base = self.image_starless, self.image_stars, self.image_32bit
             mask_3d = None
@@ -581,33 +649,60 @@ class DeveloperTab(QWidget):
                 h_f, w_f = base.shape[:2]
                 m_f = cv2.resize(self.current_mask, (w_f, h_f), interpolation=cv2.INTER_LINEAR) if self.current_mask.shape[:2] != (h_f, w_f) else self.current_mask
                 mask_3d = np.repeat(m_f[..., np.newaxis], 3, axis=2)
+            crop_active = False
+        elif self.is_zoomed_100 and self.image_32bit is not None:
+            # Recorte nativo 1:1 directo de la imagen de resolución completa
+            h_f, w_f = self.image_32bit.shape[:2]
+            cw = min(w_f, self.canvas.width())
+            ch = min(h_f, self.canvas.height())
+            
+            rx, ry = self.zoom_rel_coords
+            cx = int(rx * w_f)
+            cy = int(ry * h_f)
+
+            x1 = max(0, min(w_f - cw, cx - cw // 2))
+            y1 = max(0, min(h_f - ch, cy - ch // 2))
+            x2 = x1 + cw
+            y2 = y1 + ch
+
+            base = self.image_32bit[y1:y2, x1:x2].copy()
+            starless = self.image_starless[y1:y2, x1:x2].copy() if self.image_starless is not None else None
+            stars = self.image_stars[y1:y2, x1:x2].copy() if self.image_stars is not None else None
+
+            if self.current_mask is not None:
+                m_sub = self.current_mask[y1:y2, x1:x2]
+                mask_3d = np.repeat(m_sub[..., np.newaxis], 3, axis=2)
+            else:
+                mask_3d = None
+            crop_active = True
         else:
+            # Vista general usando el proxy optimizado
             starless, stars, base = self.proxy_starless, self.proxy_stars, self.preview_proxy
             mask_3d = self.proxy_mask
+            crop_active = False
 
         if base is None:
-            return None
+            return None, None
 
-        # Si aún no se ha ejecutado StarNet, base directa
         if starless is None or stars is None:
-            return base
+            return base, mask_3d
 
         processed_starless = starless.copy()
 
-        # 1. Reducción de Ruido (Denoise) en Starless lineal
+        # 1. Reducción de Ruido
         if self.denoise_strength > 1e-4:
             denoised = apply_denoise(
                 processed_starless,
                 strength=self.denoise_strength,
                 method=self.denoise_method,
-                is_full_res=for_export
+                is_full_res=(for_export or crop_active)
             )
             if mask_3d is not None:
                 processed_starless = (denoised * mask_3d) + (processed_starless * (1.0 - mask_3d))
             else:
                 processed_starless = denoised
 
-        # 2. Claridad y Borrar Neblina (Dehaze) sobre Starless
+        # 2. Claridad y Borrar Neblina
         if abs(self.clarity_starless_val) > 1e-4:
             clarified = apply_clarity(processed_starless, strength=self.clarity_starless_val)
             if mask_3d is not None:
@@ -622,14 +717,23 @@ class DeveloperTab(QWidget):
             else:
                 processed_starless = dehazed
 
-        # 3. Mezcla de capas
-        if self.view_layer_mode == 0:  # Compuesta
-            composed = processed_starless + (stars * self.star_intensity)
-            return np.clip(composed, 0.0, 1.0)
-        elif self.view_layer_mode == 1:  # Solo Fondo
-            return processed_starless
-        else:  # Solo Estrellas
-            return stars
+        # 3. Ondículas sobre la capa de fondo
+        if abs(self.multiescala_estructura) > 1e-4 or self.multiescala_fondo > 1e-4:
+            processed_starless = realce_multiescala_ondiculas(
+                processed_starless,
+                fuerza_estructura=self.multiescala_estructura,
+                reduccion_fondo=self.multiescala_fondo,
+                sky_mask=mask_3d[..., 0] if mask_3d is not None else None
+            )
+
+        # 4. Mezcla de capas
+        if self.view_layer_mode == 0:
+            composed = np.clip(processed_starless + (stars * self.star_intensity), 0.0, 1.0)
+            return composed, mask_3d
+        elif self.view_layer_mode == 1:
+            return processed_starless, mask_3d
+        else:
+            return stars, mask_3d
 
     # --- Cadena de Revelado Compartida ---
     def _apply_pipeline_on_image(self, target_img: np.ndarray, precomputed_mask: np.ndarray = None) -> np.ndarray:
@@ -698,18 +802,20 @@ class DeveloperTab(QWidget):
         return np.ascontiguousarray(stretched, dtype=np.float32)
 
     def update_stretch_preview(self):
-        base_to_render = self._compose_active_base(for_export=False)
+        base_to_render, active_mask = self._compose_active_base(for_export=False)
         if base_to_render is None:
             return
 
-        if self.view_layer_mode == 2:  # Solo Estrellas
+        if self.view_layer_mode == 2:
             stretched = manual_stretch(base_to_render, black_point=self.spin_bp.value(), midtone=self.spin_mtf.value())
         else:
-            stretched = self._apply_pipeline_on_image(base_to_render, precomputed_mask=self.proxy_mask)
+            stretched = self._apply_pipeline_on_image(base_to_render, precomputed_mask=active_mask)
 
         if stretched is not None:
             self.canvas.load_image(base_to_render, display_stretched=stretched)
-            self.curve_widget.set_histogram_from_image(stretched)
+            # Solo actualizamos histograma en vista completa para no sesgarlo por el recorte
+            if not self.is_zoomed_100:
+                self.curve_widget.set_histogram_from_image(stretched)
 
     # --- Callbacks StarNet ---
     def run_starnet(self):
@@ -743,6 +849,8 @@ class DeveloperTab(QWidget):
         self.slider_dehaze.setEnabled(True)
         self.combo_denoise.setEnabled(True)
         self.slider_denoise.setEnabled(True)
+        self.slider_ond_est.setEnabled(True)
+        self.slider_ond_bg.setEnabled(True)
 
         self._generate_preview_proxy()
         self.update_stretch_preview()
@@ -893,6 +1001,12 @@ class DeveloperTab(QWidget):
             self.apply_auto_mtf()
         else:
             self.sync_controls(0.0, 0.10)
+            
+    def on_canvas_zoom_toggled(self, is_zoomed: bool, rel_x: float, rel_y: float):
+        self.is_zoomed_100 = is_zoomed
+        if is_zoomed:
+            self.zoom_rel_coords = (rel_x, rel_y)
+        self.update_stretch_preview()
 
     # --- Extracción de Fondo ---
     def on_extract_background_clicked(self):
@@ -945,6 +1059,8 @@ class DeveloperTab(QWidget):
         self.slider_denoise.setEnabled(False)
         self.slider_denoise.setValue(0)
         self.combo_denoise.setEnabled(False)
+        self.slider_ond_est.setEnabled(False)
+        self.slider_ond_bg.setEnabled(False)
 
     def on_bg_extraction_error(self, err_msg: str):
         self.btn_extract_bg.setEnabled(True)
@@ -977,6 +1093,16 @@ class DeveloperTab(QWidget):
     def on_denoise_changed(self, val: int):
         self.denoise_strength = val / 100.0
         self.lbl_denoise.setText(f"{val}%")
+        self.update_stretch_preview()
+        
+    def on_ond_estructura_changed(self, val: int):
+        self.multiescala_estructura = val / 100.0
+        self.lbl_ond_est.setText(f"{self.multiescala_estructura:+.2f}")
+        self.update_stretch_preview()
+
+    def on_ond_fondo_changed(self, val: int):
+        self.multiescala_fondo = val / 100.0
+        self.lbl_ond_bg.setText(f"{val}%")
         self.update_stretch_preview()
     
     # --- Exportación Multiformato en Resolución Completa ---
@@ -1011,7 +1137,8 @@ class DeveloperTab(QWidget):
         h_full, w_full = self.image_32bit.shape[:2]
         self.log_message(f"Exportando imagen completa ({w_full}x{h_full} px)...")
 
-        full_base = self._compose_active_base(for_export=True)
+        #full_base = self._compose_active_base(for_export=True)
+        full_base, _ = self._compose_active_base(for_export=True)
 
         full_mask = None
         if self.current_mask is not None:
@@ -1054,3 +1181,106 @@ class DeveloperTab(QWidget):
         except Exception as e:
             self.log_message(f"[ERROR EXPORT] Fallo al escribir el archivo: {e}")
             QMessageBox.critical(self, "Error de Exportación", f"Fallo al escribir el archivo:\n{e}")
+            
+    def reset_all_parameters(self):
+        """Devuelve todos los controles y variables del revelador a su estado neutro original."""
+        # 1. Variables internas
+        self.lp_reduction = 0.0
+        self.clarity_starless_val = 0.0
+        self.dehaze_starless_val = 0.0
+        self.multiescala_estructura = 0.0
+        self.multiescala_fondo = 0.0
+        self.temp_val = 0.0
+        self.tint_val = 0.0
+        self.sat_sky_val = 1.0
+        self.sat_gnd_val = 1.0
+        self.vibrance_val = 0.0
+        self.contrast_val = 0.0
+        self.contrast_starless_val = 0.0
+        self.star_intensity = 1.0
+        self.view_layer_mode = 0
+        self.denoise_strength = 0.0
+        self.denoise_method = "Bilateral"
+
+        # 2. Bloquear señales de la UI para evitar recálculos en cadena
+        widgets_to_block = [
+            self.slider_lp, self.slider_stars, self.slider_contrast_starless,
+            self.slider_clarity, self.slider_dehaze, self.slider_ond_est,
+            self.slider_ond_bg, self.slider_denoise, self.combo_denoise,
+            self.slider_temp, self.slider_tint, self.slider_sat_sky,
+            self.slider_sat_gnd, self.slider_vibrance, self.slider_contrast,
+            self.combo_layer, self.spin_bp, self.slider_bp,
+            self.spin_mtf, self.slider_mtf
+        ]
+        for w in widgets_to_block:
+            w.blockSignals(True)
+
+        # 3. Restaurar valores y etiquetas de la UI
+        self.slider_lp.setValue(0)
+        self.lbl_lp.setText("0%")
+
+        self.combo_layer.setCurrentIndex(0)
+        self.combo_layer.setEnabled(False)
+
+        self.slider_stars.setValue(100)
+        self.lbl_stars.setText("100%")
+        self.slider_stars.setEnabled(False)
+
+        self.slider_contrast_starless.setValue(0)
+        self.lbl_contrast_starless.setText("0.00")
+        self.slider_contrast_starless.setEnabled(False)
+
+        self.slider_clarity.setValue(0)
+        self.lbl_clarity.setText("0.00")
+        self.slider_clarity.setEnabled(False)
+
+        self.slider_dehaze.setValue(0)
+        self.lbl_dehaze.setText("0.00")
+        self.slider_dehaze.setEnabled(False)
+
+        self.slider_ond_est.setValue(0)
+        self.lbl_ond_est.setText("0.00")
+        self.slider_ond_est.setEnabled(False)
+
+        self.slider_ond_bg.setValue(0)
+        self.lbl_ond_bg.setText("0%")
+        self.slider_ond_bg.setEnabled(False)
+
+        self.combo_denoise.setCurrentIndex(0)
+        self.combo_denoise.setEnabled(False)
+        self.slider_denoise.setValue(0)
+        self.lbl_denoise.setText("0%")
+        self.slider_denoise.setEnabled(False)
+
+        if hasattr(self, 'curve_widget'):
+            self.curve_widget.reset_curve()
+
+        self.slider_temp.setValue(0)
+        self.lbl_temp_val.setText("0.000")
+        self.slider_tint.setValue(0)
+        self.lbl_tint_val.setText("0.000")
+
+        self.slider_sat_sky.setValue(100)
+        self.lbl_sat_sky.setText("1.00x")
+        self.slider_sat_gnd.setValue(100)
+        self.lbl_sat_gnd.setText("1.00x")
+
+        self.slider_vibrance.setValue(0)
+        self.lbl_vibrance.setText("0.00")
+
+        self.slider_contrast.setValue(0)
+        self.lbl_contrast.setText("0.00")
+
+        self.spin_bp.setValue(0.0)
+        self.slider_bp.setValue(0)
+        self.spin_mtf.setValue(0.10)
+        self.slider_mtf.setValue(400)
+        
+        self.is_zoomed_100 = False
+        self.zoom_rel_coords = (0.5, 0.5)
+        if hasattr(self, 'canvas'):
+            self.canvas.is_zoomed = False
+
+        # 4. Desbloquear señales
+        for w in widgets_to_block:
+            w.blockSignals(False)
