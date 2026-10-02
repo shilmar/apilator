@@ -1,5 +1,6 @@
 # gui/tab_developer.py
 import os
+import gc
 import cv2
 import numpy as np
 import tifffile
@@ -79,12 +80,18 @@ class DeveloperTab(QWidget):
         self.sat_gnd_val = 1.0       # 0.00x a 2.50x
         self.vibrance_val = 0.0      # -1.00 a +1.00
         self.contrast_val = 0.0      # -1.00 a +1.00
+        
+        # Parámetros de Tono del Suelo 
+        self.gnd_ev_val = 0.0        # -2.00 EV a +3.00 EV
+        self.gnd_shadows_val = 0.0   # 0.0 a 1.0 (0% a 100%)
+        self.gnd_bp_val = 0.0        # -0.050 a +0.100
+        
         self.star_intensity = 1.0    # 1.0 = 100%, 0.0 = Starless puro
         self.view_layer_mode = 0     # 0: Compuesta, 1: Solo Fondo, 2: Solo Estrellas
         self.contrast_starless_val = 0.0  # -1.0 a +1.0 (solo para el fondo sin estrellas)
 
         # Parámetros de Reducción de Ruido
-        self.denoise_strength = 0.0
+        #self.denoise_strength = 0.0
         self.denoise_method = "Bilateral"
         
         self._setup_ui()
@@ -268,18 +275,9 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_ondiculas)
         
-        # --- Reducción de Ruido (Denoise) ---
+        # --- Reducción de Ruido (Fondo) ---
         grp_dn = QGroupBox("Reducción de Ruido (Fondo)")
         layout_dn = QVBoxLayout(grp_dn)
-
-        row_dn_mode = QHBoxLayout()
-        row_dn_mode.addWidget(QLabel("Método:"))
-        self.combo_denoise = QComboBox()
-        self.combo_denoise.addItems(["Bilateral", "Guided Filter", "NL-Means"])
-        self.combo_denoise.setEnabled(False)
-        self.combo_denoise.currentTextChanged.connect(self.on_denoise_method_changed)
-        row_dn_mode.addWidget(self.combo_denoise)
-        layout_dn.addLayout(row_dn_mode)
 
         row_dn = QHBoxLayout()
         row_dn.addWidget(QLabel("Fuerza Denoise:"))
@@ -348,6 +346,56 @@ class DeveloperTab(QWidget):
         btn_reset_wb.clicked.connect(self.reset_wb)
         wb_layout.addWidget(btn_reset_wb)
         left_layout.addWidget(grp_wb)
+
+        # --- NUEVO: Módulo Ajuste Tonal de Suelo ---
+        grp_gnd_tone = QGroupBox("Ajuste Tonal Suelo (Paisaje)")
+        gnd_tone_layout = QVBoxLayout(grp_gnd_tone)
+        gnd_tone_layout.setSpacing(3)
+
+        # 1. Exposición Suelo (EV)
+        row_gnd_ev = QHBoxLayout()
+        row_gnd_ev.addWidget(QLabel("Exposición Suelo:"))
+        self.lbl_gnd_ev = QLabel("0.00 EV")
+        row_gnd_ev.addWidget(self.lbl_gnd_ev)
+        gnd_tone_layout.addLayout(row_gnd_ev)
+
+        self.slider_gnd_ev = QSlider(Qt.Horizontal)
+        self.slider_gnd_ev.setRange(-200, 300)  # -2.00 EV a +3.00 EV
+        self.slider_gnd_ev.setValue(0)
+        self.slider_gnd_ev.valueChanged.connect(self.on_gnd_ev_changed)
+        gnd_tone_layout.addWidget(self.slider_gnd_ev)
+
+        # 2. Recuperar Sombras Suelo
+        row_gnd_sh = QHBoxLayout()
+        row_gnd_sh.addWidget(QLabel("Recuperar Sombras:"))
+        self.lbl_gnd_sh = QLabel("0%")
+        row_gnd_sh.addWidget(self.lbl_gnd_sh)
+        gnd_tone_layout.addLayout(row_gnd_sh)
+
+        self.slider_gnd_sh = QSlider(Qt.Horizontal)
+        self.slider_gnd_sh.setRange(0, 100)  # 0% a 100%
+        self.slider_gnd_sh.setValue(0)
+        self.slider_gnd_sh.valueChanged.connect(self.on_gnd_shadows_changed)
+        gnd_tone_layout.addWidget(self.slider_gnd_sh)
+
+        # 3. Punto Negro Suelo
+        row_gnd_bp = QHBoxLayout()
+        row_gnd_bp.addWidget(QLabel("Punto Negro Suelo:"))
+        self.lbl_gnd_bp = QLabel("0.000")
+        row_gnd_bp.addWidget(self.lbl_gnd_bp)
+        gnd_tone_layout.addLayout(row_gnd_bp)
+
+        self.slider_gnd_bp = QSlider(Qt.Horizontal)
+        self.slider_gnd_bp.setRange(-50, 100)  # -0.050 a +0.100
+        self.slider_gnd_bp.setValue(0)
+        self.slider_gnd_bp.valueChanged.connect(self.on_gnd_bp_changed)
+        gnd_tone_layout.addWidget(self.slider_gnd_bp)
+
+        btn_reset_gnd = QPushButton("Restablecer Tono Suelo")
+        btn_reset_gnd.clicked.connect(self.reset_gnd_tone)
+        gnd_tone_layout.addWidget(btn_reset_gnd)
+
+        left_layout.addWidget(grp_gnd_tone)
 
         # Módulo Saturación e Intensidad (Vibrance)
         grp_sat = QGroupBox("Color: Saturación e Intensidad")
@@ -608,7 +656,7 @@ class DeveloperTab(QWidget):
         self.lbl_contrast_starless.setText("0.00")        
         if hasattr(self, 'curve_widget'):
             self.curve_widget.reset_curve()
-        self.combo_denoise.setEnabled(False)
+        #self.combo_denoise.setEnabled(False)
         self.slider_ond_est.setEnabled(False)
         self.slider_ond_bg.setEnabled(False)
         
@@ -694,7 +742,6 @@ class DeveloperTab(QWidget):
             denoised = apply_denoise(
                 processed_starless,
                 strength=self.denoise_strength,
-                method=self.denoise_method,
                 is_full_res=(for_export or crop_active)
             )
             if mask_3d is not None:
@@ -768,6 +815,38 @@ class DeveloperTab(QWidget):
         if self.lp_reduction > 1e-4:
             mask_2d = precomputed_mask[..., 0] if precomputed_mask is not None else None
             img = apply_light_pollution_gradient(img, strength=self.lp_reduction, height_ratio=0.50, sky_mask=mask_2d)
+
+        # === NUEVO: Ajuste Tonal Diferencial para el Suelo ===
+        if precomputed_mask is not None:
+            has_gnd_tone_change = (
+                abs(self.gnd_ev_val) > 1e-4 or 
+                self.gnd_shadows_val > 1e-4 or 
+                abs(self.gnd_bp_val) > 1e-4
+            )
+            if has_gnd_tone_change:
+                # Extraemos el suelo actual
+                gnd_part = img.copy()
+
+                # a) Exposición diferencial en escala EV
+                if abs(self.gnd_ev_val) > 1e-4:
+                    gnd_part = gnd_part * (2.0 ** self.gnd_ev_val)
+
+                # b) Recuperación de sombras suave (sin quemar medios tonos ni altas luces)
+                if self.gnd_shadows_val > 1e-4:
+                    lift_curve = (1.0 - np.clip(gnd_part, 0.0, 1.0)) ** 2
+                    gnd_part = gnd_part * (1.0 + self.gnd_shadows_val * lift_curve)
+
+                # c) Ajuste de punto negro / pedestal específico para el suelo
+                if abs(self.gnd_bp_val) > 1e-4:
+                    if self.gnd_bp_val < 0.0:
+                        # Hacia la derecha (gnd_bp_val < 0): añade pedestal de luz a las sombras
+                        gnd_part = np.clip(gnd_part - self.gnd_bp_val, 0.0, 1.0)
+                    else:
+                        # Hacia la izquierda (gnd_bp_val > 0): recorta/oscurece sombras
+                        gnd_part = np.clip((gnd_part - self.gnd_bp_val) / max(1e-4, 1.0 - self.gnd_bp_val), 0.0, 1.0)
+
+                # Fusionamos respetando la máscara: precomputed_mask=1 (cielo), 0 (suelo)
+                img = (img * precomputed_mask) + (gnd_part * (1.0 - precomputed_mask))
 
         # 4. Estirado MTF (espacio visible [0.0, 1.0])
         bp_val = self.spin_bp.value()
@@ -847,7 +926,7 @@ class DeveloperTab(QWidget):
         self.slider_contrast_starless.setEnabled(True) 
         self.slider_clarity.setEnabled(True)
         self.slider_dehaze.setEnabled(True)
-        self.combo_denoise.setEnabled(True)
+        #self.combo_denoise.setEnabled(True)
         self.slider_denoise.setEnabled(True)
         self.slider_ond_est.setEnabled(True)
         self.slider_ond_bg.setEnabled(True)
@@ -1058,7 +1137,7 @@ class DeveloperTab(QWidget):
         self.lbl_contrast_starless.setText("0.00")
         self.slider_denoise.setEnabled(False)
         self.slider_denoise.setValue(0)
-        self.combo_denoise.setEnabled(False)
+        #self.combo_denoise.setEnabled(False)
         self.slider_ond_est.setEnabled(False)
         self.slider_ond_bg.setEnabled(False)
 
@@ -1086,9 +1165,10 @@ class DeveloperTab(QWidget):
         self.dehaze_starless_val = val / 100.0  # Mapea -200..200 a -2.00..+2.00
         self.lbl_dehaze.setText(f"{self.dehaze_starless_val:+.2f}")
         self.update_stretch_preview()
-    def on_denoise_method_changed(self, text: str):
-        self.denoise_method = text
-        self.update_stretch_preview()
+    
+    #def on_denoise_method_changed(self, text: str):
+    #    self.denoise_method = text
+    #    self.update_stretch_preview()
 
     def on_denoise_changed(self, val: int):
         self.denoise_strength = val / 100.0
@@ -1103,6 +1183,46 @@ class DeveloperTab(QWidget):
     def on_ond_fondo_changed(self, val: int):
         self.multiescala_fondo = val / 100.0
         self.lbl_ond_bg.setText(f"{val}%")
+        self.update_stretch_preview()
+    
+    # --- Callbacks Ajuste Tonal Suelo ---
+    def on_gnd_ev_changed(self, val: int):
+        self.gnd_ev_val = val / 100.0
+        self.lbl_gnd_ev.setText(f"{self.gnd_ev_val:+.2f} EV")
+        self.update_stretch_preview()
+
+    def on_gnd_shadows_changed(self, val: int):
+        self.gnd_shadows_val = val / 100.0
+        self.lbl_gnd_sh.setText(f"{val}%")
+        self.update_stretch_preview()
+
+    def on_gnd_bp_changed(self, val: int):
+        self.gnd_bp_val = - (val / 1000.0)
+        display_val = val / 1000.0
+        self.lbl_gnd_bp.setText(f"{display_val:+.3f}")
+        self.update_stretch_preview()
+
+    def reset_gnd_tone(self):
+        self.slider_gnd_ev.blockSignals(True)
+        self.slider_gnd_sh.blockSignals(True)
+        self.slider_gnd_bp.blockSignals(True)
+
+        self.slider_gnd_ev.setValue(0)
+        self.slider_gnd_sh.setValue(0)
+        self.slider_gnd_bp.setValue(0)
+
+        self.gnd_ev_val = 0.0
+        self.gnd_shadows_val = 0.0
+        self.gnd_bp_val = 0.0
+
+        self.lbl_gnd_ev.setText("0.00 EV")
+        self.lbl_gnd_sh.setText("0%")
+        self.lbl_gnd_bp.setText("0.000")
+
+        self.slider_gnd_ev.blockSignals(False)
+        self.slider_gnd_sh.blockSignals(False)
+        self.slider_gnd_bp.blockSignals(False)
+
         self.update_stretch_preview()
     
     # --- Exportación Multiformato en Resolución Completa ---
@@ -1200,18 +1320,23 @@ class DeveloperTab(QWidget):
         self.star_intensity = 1.0
         self.view_layer_mode = 0
         self.denoise_strength = 0.0
-        self.denoise_method = "Bilateral"
+        self.gnd_ev_val = 0.0
+        self.gnd_shadows_val = 0.0
+        self.gnd_bp_val = 0.0
+        #self.denoise_method = "Bilateral"
 
         # 2. Bloquear señales de la UI para evitar recálculos en cadena
         widgets_to_block = [
             self.slider_lp, self.slider_stars, self.slider_contrast_starless,
             self.slider_clarity, self.slider_dehaze, self.slider_ond_est,
-            self.slider_ond_bg, self.slider_denoise, self.combo_denoise,
+            self.slider_ond_bg, self.slider_denoise, 
             self.slider_temp, self.slider_tint, self.slider_sat_sky,
             self.slider_sat_gnd, self.slider_vibrance, self.slider_contrast,
             self.combo_layer, self.spin_bp, self.slider_bp,
-            self.spin_mtf, self.slider_mtf
+            self.spin_mtf, self.slider_mtf,
+            self.slider_gnd_ev, self.slider_gnd_sh, self.slider_gnd_bp,
         ]
+        #self.combo_denoise,
         for w in widgets_to_block:
             w.blockSignals(True)
 
@@ -1246,8 +1371,8 @@ class DeveloperTab(QWidget):
         self.lbl_ond_bg.setText("0%")
         self.slider_ond_bg.setEnabled(False)
 
-        self.combo_denoise.setCurrentIndex(0)
-        self.combo_denoise.setEnabled(False)
+        #self.combo_denoise.setCurrentIndex(0)
+        #self.combo_denoise.setEnabled(False)
         self.slider_denoise.setValue(0)
         self.lbl_denoise.setText("0%")
         self.slider_denoise.setEnabled(False)
@@ -1271,6 +1396,13 @@ class DeveloperTab(QWidget):
         self.slider_contrast.setValue(0)
         self.lbl_contrast.setText("0.00")
 
+        self.slider_gnd_ev.setValue(0)
+        self.lbl_gnd_ev.setText("0.00 EV")
+        self.slider_gnd_sh.setValue(0)
+        self.lbl_gnd_sh.setText("0%")
+        self.slider_gnd_bp.setValue(0)
+        self.lbl_gnd_bp.setText("0.000")
+
         self.spin_bp.setValue(0.0)
         self.slider_bp.setValue(0)
         self.spin_mtf.setValue(0.10)
@@ -1284,3 +1416,54 @@ class DeveloperTab(QWidget):
         # 4. Desbloquear señales
         for w in widgets_to_block:
             w.blockSignals(False)
+            
+    def clear_session(self):
+        """
+        Descarga por completo la sesión del revelador:
+        vacía buffers de 32 bits, proxies, máscaras, canvas y fuerza gc.collect().
+        """
+        # 1. Resetear todos los sliders y variables de parámetros
+        self.reset_all_parameters()
+
+        # 2. Desvincular y liberar buffers pesados de imagen nativa
+        self.image_32bit = None
+        self.image_starless = None
+        self.image_stars = None
+
+        # 3. Desvincular y liberar proxies acelerados
+        self.preview_proxy = None
+        self.proxy_starless = None
+        self.proxy_stars = None
+        self.proxy_mask = None
+
+        # 4. Estado de proyecto y máscaras
+        self.current_mask = None
+        self.active_filepath = None
+
+        # 5. Deshabilitar controles dependientes de StarNet y procesado
+        self.combo_layer.setEnabled(False)
+        self.slider_stars.setEnabled(False)
+        self.slider_contrast_starless.setEnabled(False)
+        self.slider_clarity.setEnabled(False)
+        self.slider_dehaze.setEnabled(False)
+        #self.combo_denoise.setEnabled(False)
+        self.slider_denoise.setEnabled(False)
+        self.slider_ond_est.setEnabled(False)
+        self.slider_ond_bg.setEnabled(False)
+
+        # 6. Limpiar lienzo interactivo
+        if hasattr(self, 'canvas') and self.canvas is not None:
+            self.canvas.orig_rgb = None
+            self.canvas.base_pixmap = None
+            self.canvas.display_stretched = None
+            if hasattr(self.canvas, 'scribble_pixmap') and self.canvas.scribble_pixmap is not None:
+                self.canvas.scribble_pixmap.fill(Qt.transparent)
+            if hasattr(self.canvas, 'refined_overlay'):
+                self.canvas.refined_overlay = None
+            self.canvas.update()
+
+        # 7. Limpiar registro de logs
+        self.txt_log.clear()
+
+        # 8. Recolección forzada de memoria RAM
+        gc.collect()

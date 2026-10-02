@@ -247,56 +247,39 @@ def _guided_filter(guide: np.ndarray, src: np.ndarray, radius: int, eps: float) 
 def apply_denoise(
     img_rgb: np.ndarray,
     strength: float = 0.0,
-    method: str = "Bilateral",
     is_full_res: bool = False
 ) -> np.ndarray:
     """
-    Aplica reducción de ruido en img_rgb (float32 [0.0, 1.0]).
+    Aplica reducción de ruido mediante Guided Filter nativo en float32 [0.0, 1.0].
+    Preserva bordes finos, nebulosas y filamentos sin cuantizar ni generar banding.
+    
     - strength: [0.0, 1.0] (0% a 100%)
-    - method: 'Bilateral', 'Guided Filter', o 'NL-Means'
-    - is_full_res: si es True, escala el radio del kernel para resolución completa.
+    - is_full_res: escala el radio geométrico para resolución completa nativa.
     """
     if strength <= 1e-4:
         return img_rgb
 
-    scale_factor = 2.5 if is_full_res else 1.0
-    u8 = (np.clip(img_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+    # Factor de escala geométrico para compensar diferencia proxy vs sensor completo
+    scale = 2.5 if is_full_res else 1.0
 
-    if method == "Bilateral":
-        # d: diámetro del vecindario de píxeles
-        d = int(max(3, round((5 + 4 * strength) * scale_factor)))
-        sigma_color = float(strength * 75.0)
-        sigma_space = float((strength * 8.0 + 2.0) * scale_factor)
-        filtered = cv2.bilateralFilter(u8, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space)
-        return (filtered.astype(np.float32) / 255.0)
+    # Radio de vecindad: crecimiento progresivo y suave (de 2 a ~6 px en proxy, escalado en full)
+    radius = int(max(2, round((2.0 + 4.0 * (strength ** 0.8)) * scale)))
 
-    elif method == "Guided Filter":
-        radius = int(max(2, round((2 + 5 * strength) * scale_factor)))
-        # Regularización epsilon: controla cuánto suaviza las variaciones pequeñas
-        eps = float((0.001 + 0.04 * strength) ** 2)
-        gray_guide = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-        
-        channels = []
-        for c in range(3):
-            ch_denoised = _guided_filter(gray_guide, img_rgb[..., c], radius=radius, eps=eps)
-            channels.append(ch_denoised)
-        out = np.stack(channels, axis=-1)
-        return np.clip(out, 0.0, 1.0).astype(np.float32)
+    # Epsilon: respuesta logarítmica/potencial suave.
+    # En 1% es casi imperceptible (1e-6) y en 100% alcanza un filtrado firme (1.5e-3)
+    # sin lavar detalles estructurales.
+    eps = float(1e-6 * (1500.0 ** strength))
 
-    elif method == "NL-Means":
-        # fastNlMeansDenoisingColored opera en uint8
-        h_lum = float(strength * 18.0)
-        h_col = float(strength * 18.0)
-        t_size = 7
-        s_size = 15 if not is_full_res else 21
-        filtered = cv2.fastNlMeansDenoisingColored(
-            u8, None,
-            h=h_lum, hColor=h_col,
-            templateWindowSize=t_size, searchWindowSize=s_size
-        )
-        return (filtered.astype(np.float32) / 255.0)
+    # Guía en escala de grises float32 (sin cuantizar a uint8)
+    gray_guide = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
 
-    return img_rgb
+    channels = []
+    for c in range(3):
+        ch_denoised = _guided_filter(gray_guide, img_rgb[..., c], radius=radius, eps=eps)
+        channels.append(ch_denoised)
+
+    out = np.stack(channels, axis=-1)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
     
 def apply_curve_lut(img_rgb: np.ndarray, lut: np.ndarray) -> np.ndarray:
     """

@@ -64,7 +64,8 @@ class FileListRow(QWidget):
 class StackerTab(QWidget):
     stacking_finished = Signal(str, object)
     session_title_changed = Signal(str)
-
+    new_session_requested = Signal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project_mgr = ProjectManager()
@@ -105,7 +106,15 @@ class StackerTab(QWidget):
         proj_layout.addWidget(self.lbl_session)
 
         btn_proj_row = QHBoxLayout()
-        btn_open_sess = QPushButton("Cargar Sesión")
+        
+        # --- NUEVO: Botón Nueva Sesión ---
+        btn_new_sess = QPushButton("Nueva")
+        btn_new_sess.setStyleSheet("font-weight: bold; color: #ffab91;")
+        btn_new_sess.setToolTip("Reiniciar proyecto completo, vaciar tomas, máscaras y revelador")
+        btn_new_sess.clicked.connect(self.on_new_session_clicked)
+        btn_proj_row.addWidget(btn_new_sess)
+
+        btn_open_sess = QPushButton("Cargar")
         btn_open_sess.clicked.connect(self.open_project)
         btn_save_sess = QPushButton("Guardar")
         btn_save_sess.clicked.connect(self.save_project)
@@ -643,3 +652,57 @@ class StackerTab(QWidget):
         self.progress_bar.setFormat("Error")
         # Resto de tu lógica de error existente
         
+    def on_new_session_clicked(self):
+        """Pide confirmación y resetea la sesión en todo el software."""
+        # Si el worker está apilando, no permitir reiniciar
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.warning(self, "Aviso", "No puedes reiniciar la sesión mientras el apilado está en ejecución.")
+            return
+
+        resp = QMessageBox.question(
+            self, "Nueva Sesión",
+            "¿Deseas reiniciar toda la sesión actual?\n\n"
+            "Se vaciarán las listas de Lights/Darks, la máscara dibujada "
+            "y se restablecerá el revelador a su estado inicial.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        self.reset_session()
+        self.new_session_requested.emit()
+        self.log_message("[SESIÓN] Nueva sesión iniciada. Entorno restablecido.")
+
+    def reset_session(self):
+        """Limpia todo el estado interno y la interfaz del apilador."""
+        # 1. Listas y referencias
+        self.lights_list.clear()
+        self.darks_list.clear()
+        self.list_lights.clear()
+        self.list_darks.clear()
+        self.current_ref_path = None
+        self.last_stacked_output_path = None
+
+        # 2. Proyecto
+        self.project_mgr = ProjectManager()
+        self.lbl_session.setText("Sesión: Sin guardar")
+        self.session_title_changed.emit("")
+
+        # 3. Máscara y Canvas
+        self.clear_mask()
+        self.canvas.orig_rgb = None
+        self.canvas.base_pixmap = None
+        self.canvas.update()
+
+        # 4. Parámetros de apilado a valores por defecto
+        self.combo_mode.setCurrentIndex(0)
+        self.spin_kappa.setValue(2.2)
+        self.combo_lp_algo.setCurrentIndex(0)
+        self.slider_stack_lp.setValue(50)
+        self.spin_feather.setValue(7)
+        self.spin_iter.setValue(3)
+
+        # 5. Barra de progreso y logs
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.txt_log.clear()

@@ -10,7 +10,7 @@ from gui.tab_settings import SettingsTab
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Apilator - Astrofotografía de Paisaje (v0.5.1)")
+        self.setWindowTitle("Apilator - Astrofotografía de Paisaje (v0.5.2)")
         self.resize(1360, 880)
 
         self._setup_ui()
@@ -32,6 +32,9 @@ class MainWindow(QMainWindow):
 
         # Conectar el apilado terminado con el revelador automático
         self.tab_stacker.stacking_finished.connect(self._on_stacking_finished)
+        
+        #Resetear revelador al pulsar Nueva Sesión en el apilador
+        self.tab_stacker.new_session_requested.connect(self.tab_developer.clear_session)
 
     def _on_stacking_finished(self, output_path: str):
         """Al terminar de apilar, transfiere imagen y máscara al revelador y cambia de pestaña."""
