@@ -321,11 +321,30 @@ def align_single_light_task(args: tuple) -> dict:
         num_inliers = int(np.sum(inliers)) if inliers is not None else 0
         del dst_pts, src_pts, inliers
 
+        # Si disponemos de máscara, anulamos el suelo de la toma antes de rotar
+        # para que ramas y árboles rotados no ensucien el cielo estelar
+        if sky_mask is not None:
+            # Aseguramos que la máscara esté en float32 y tamaño correcto
+            sm = sky_mask if sky_mask.shape[:2] == (h, w) else cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            if sm.ndim == 2:
+                sm_3d = sm[..., np.newaxis]
+            else:
+                sm_3d = sm
+
+            # Reemplazamos el suelo por el pedestal medio del cielo para que no genere bordes negros artificiales
+            sky_median_val = np.median(calibrated_frame[sm > 0.5]) if np.any(sm > 0.5) else 0.05
+            clean_sky_frame = (calibrated_frame * sm_3d) + (sky_median_val * (1.0 - sm_3d))
+        else:
+            clean_sky_frame = calibrated_frame
+
         warped = cv2.warpPerspective(
-            calibrated_frame, H_matrix, (w, h),
+            clean_sky_frame, H_matrix, (w, h),
             flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_REFLECT
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0)
         )
+        del clean_sky_frame
+        
         del calibrated_frame
 
         warped_processed = preprocess_subframe_lp(
@@ -411,7 +430,11 @@ def _process_single_chunk(args):
         mad = np.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
-        low = med - 2.5 * sigma
+        # Rechazo asimétrico:
+        # - Límite superior holgado (+3.0) para preservar nebulosas y estrellas tenues
+        # - Límite inferior muy estricto (-0.6 a -0.8) para purgar de inmediato cualquier
+        #   sombra de ramas u obstáculos que hayan rotado sobre el cielo
+        low = med - 0.4 * sigma
         high = med + upper_tol * sigma
 
         valid = (channel_data >= low) & (channel_data <= high)
@@ -482,7 +505,7 @@ def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = 
         mad = cp.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
-        low = med - 2.5 * sigma
+        low = med - 0.4 * sigma
         high = med + (kappa + 0.8) * sigma
         valid = (ch_data >= low) & (ch_data <= high)
 

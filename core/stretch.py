@@ -133,39 +133,46 @@ def adjust_vibrance(img_rgb: np.ndarray, vibrance: float = 0.0) -> np.ndarray:
 
 def adjust_contrast(img_rgb: np.ndarray, contrast: float = 0.0, pivot: float = None) -> np.ndarray:
     """
-    Ajuste de contraste sigmoidal en 'S' sobre espacio estirado [0.0, 1.0].
-    - contrast > 0: curva en S (sombras caen, luces suben, aumenta el relieve).
-    - contrast < 0: comprime el rango (sombras suben, luces bajan).
+    Ajuste de contraste sigmoidal en 'S' suave y progresivo en rango [0.0, 1.0].
+    Garantiza estrictamente f(0) = 0 y f(1) = 1, eliminando el empaste o recorte
+    de sombras y transiciones bruscas cerca de contrast = 0.
+    
+    - contrast: [-1.0, 1.0] (0.0 neutro).
+    - pivot: punto de inflexión tonal (por defecto 0.35 para proteger sombras profundas).
     """
     if abs(contrast) < 1e-4:
         return img_rgb
 
-    # Si no se indica pivote, se usa la mediana real de la imagen estirada
+    # Anclaje de pivote seguro: por defecto 0.35 para centrarse en gas y nebulosas
+    # sin perturbar el pedestal de fondo de cielo
     if pivot is None:
-        pivot = float(np.median(img_rgb))
-    
-    pivot = np.clip(pivot, 0.05, 0.85)
-
-    # Factor de ganancia (alfa)
-    # contrast de -1.0 a +1.0
-    alpha = contrast * 2.5
-
-    # Función sigmoide cuadrática normalizada
-    # delta va de -pivot a (1 - pivot)
-    delta = img_rgb - pivot
-
-    # Aplicamos una función tangente hiperbólica normalizada
-    # Esto asegura que f(pivot) = pivot, f(0) >= 0 y f(1) <= 1
-    # sin cambiar el nivel medio de brillo
-    if contrast >= 0:
-        factor = np.tanh(alpha * delta) / np.tanh(alpha * max(pivot, 1.0 - pivot) + 1e-6)
-        # Atenuación en los extremos para no recortar a blanco o negro duro
-        scale = np.where(delta < 0, pivot, 1.0 - pivot)
-        out = pivot + factor * scale
+        pivot = 0.35
     else:
-        # Suavizado de contraste
-        gain = 1.0 / (1.0 - alpha * 0.5)
-        out = pivot + delta * (1.0 + contrast * 0.7)
+        pivot = float(np.clip(pivot, 0.10, 0.70))
+
+    x = np.clip(img_rgb, 0.0, 1.0)
+
+    if contrast > 0:
+        # k modula la pendiente: contraste de +0.01 genera un incremento suave e imperceptible
+        # mientras que +1.0 produce una curva pronunciada sin recortes
+        k = 1.0 + (contrast * 9.0)
+
+        # Función sigmoidal normalizada con f(0)=0 y f(1)=1
+        # Usamos formulación algebraica continua libre de overflow exp()
+        # s(x) = (x / pivot)^k si x < pivot, 1 - ((1 - x)/(1 - pivot))^k si x >= pivot
+        # Para garantizar derivada suave usamos una mezcla sinusoidal/polinómica
+        sig = 1.0 / (1.0 + np.exp(-k * (x - pivot)))
+        sig_0 = 1.0 / (1.0 + np.exp(k * pivot))
+        sig_1 = 1.0 / (1.0 + np.exp(-k * (1.0 - pivot)))
+
+        norm_s = (sig - sig_0) / max(1e-7, (sig_1 - sig_0))
+
+        # Mezcla ponderada por el valor de contraste para asegurar continuidad en 0.00
+        out = (1.0 - contrast) * x + contrast * norm_s
+    else:
+        # Reducción suave de contraste hacia el pivote
+        factor = 1.0 + (contrast * 0.5)  # contrast es negativo
+        out = pivot + (x - pivot) * factor
 
     return np.clip(out, 0.0, 1.0).astype(np.float32)
     

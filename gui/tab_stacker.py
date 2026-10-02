@@ -417,18 +417,34 @@ class StackerTab(QWidget):
             QMessageBox.warning(self, "Aviso", "Debes pintar al menos un trazo verde (cielo) y uno rojo (suelo).")
             return
 
-        self.log_message("Refinando máscara cielo/suelo...")
+        # 1. Feedback de inicio
+        self.log_message("[MÁSCARA] Iniciando refinamiento automático...")
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QCursor
+        self.setCursor(Qt.WaitCursor)
+        QCoreApplication.processEvents()  # Fuerza a Qt a pintar el mensaje y cambiar el cursor de inmediato
+
         feather = self.spin_feather.value()
         iters = self.spin_iter.value()
-        
-        self.computed_mask = refine_mask_guided(
-            self.canvas.orig_rgb, 
-            scribbles,
-            feather_radius=feather,
-            iterations=iters
-        )
-        self.canvas.set_refined_mask(self.computed_mask)
-        self.log_message(f"Máscara refinada con éxito (Borde: {feather}px, Pasos: {iters}).")
+        t_start = time.perf_counter()
+
+        try:
+            self.computed_mask = refine_mask_guided(
+                self.canvas.orig_rgb, 
+                scribbles,
+                feather_radius=feather,
+                iterations=iters
+            )
+            self.canvas.set_refined_mask(self.computed_mask)
+            
+            elapsed = time.perf_counter() - t_start
+            # 2. Mensaje inequívoco de finalización con tiempo medido
+            self.log_message(f"✓ [MÁSCARA FINALIZADA] Refinamiento completado con éxito en {elapsed:.2f} s (Borde: {feather}px, Pasos: {iters}).")
+        except Exception as e:
+            self.log_message(f"[ERROR MÁSCARA] Falló el refinado: {e}")
+            QMessageBox.critical(self, "Error", f"Fallo al refinar la máscara:\n{e}")
+        finally:
+            self.unsetCursor()
 
     def clear_mask(self):
         """Elimina todos los trazos y la máscara calculada para empezar de cero."""

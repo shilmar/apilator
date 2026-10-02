@@ -297,17 +297,33 @@ class StackingWorker(QThread):
                 # FASE 4/4: COMPOSICIÓN Y GUARDADO (Rango 95% -> 100%)
                 # ============================================================
                 t0_comp = time.perf_counter()
-                self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits con máscara suavizada...")
+                self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
                 self.progress_changed.emit(96)
 
-                ksize = int(max(15, (min(h, w) // 150) | 1))
-                if ksize % 2 == 0:
-                    ksize += 1
-                smooth_mask = cv2.GaussianBlur(sky_mask.astype(np.float32), (ksize, ksize), sigmaX=ksize / 3.0)
-                mask_3d = np.repeat(smooth_mask[..., np.newaxis], 3, axis=2)
+                raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
 
-                final_composite = (sky_stacked * mask_3d) + (ground_stacked * (1.0 - mask_3d))
-                del ground_stacked, mask_3d, smooth_mask
+                # Transición suave microscópica (sigma 0.8 - 1.0) para que Claridad no cree halos
+                smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
+                if smooth_mask.ndim == 2:
+                    mask_3d = smooth_mask[..., np.newaxis]
+                else:
+                    mask_3d = smooth_mask
+
+                # Fusión lineal continua
+                base_composite = (sky_stacked * mask_3d) + (ground_stacked * (1.0 - mask_3d))
+
+                # Protección de silueta sin bordes duros:
+                # En la franja de transición (donde mask_3d está entre 0.05 y 0.95), 
+                # si el suelo estático es más oscuro (ramas/hojas), permitimos que preserve
+                # la silueta natural sin crear un escalón de contraste artificial
+                transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
+                final_composite = np.where(
+                    transition_zone & (ground_stacked < base_composite),
+                    ground_stacked * (1.0 - mask_3d * 0.5) + base_composite * (mask_3d * 0.5),
+                    base_composite
+                )
+
+                del ground_stacked, mask_3d, smooth_mask, base_composite
                 dt_comp = time.perf_counter() - t0_comp
                 self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
             else:
