@@ -544,12 +544,13 @@ class StackerTab(QWidget):
             return
 
         # --- Iniciar temporizador ---
-        self.stack_start_time = time.perf_counter()
+        # Guardar tiempo de inicio para calcular ETA
+        self._stack_start_time = time.perf_counter()
 
         self.last_stacked_output_path = out_path
         self.btn_run.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.log_message("=== INICIANDO APILADO SUBPÍXEL CON CALIBRACIÓN ===")
+        self.progress_bar.setFormat("Iniciando... %p%")
 
         # Mapeo del algoritmo seleccionado a clave interna
         lp_mode_idx = self.combo_lp_algo.currentIndex()
@@ -560,6 +561,11 @@ class StackerTab(QWidget):
         app_cfg = load_config()
         cpu_workers = int(app_cfg.get("cpu_workers", max(1, (os.cpu_count() or 4) - 1)))
 
+        try:
+            saved_storage = self.window().tab_settings.combo_storage.currentData()
+        except Exception:
+            saved_storage = "auto"
+            
         cfg = {
             "lights": self.lights_list,
             "darks": self.darks_list,
@@ -570,11 +576,13 @@ class StackerTab(QWidget):
             "lp_method": selected_lp_method,
             "lp_strength": selected_lp_strength,
             "use_gpu": is_gpu_enabled(),
+            "storage_strategy": saved_storage,
             "cpu_workers": cpu_workers  
         }
 
         self.worker = StackingWorker(cfg)
-        self.worker.progress_changed.connect(self.progress_bar.setValue)
+        # CORRECTO
+        self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.status_changed.connect(self.log_message)
         self.worker.finished_success.connect(self.on_stack_success)
         self.worker.error_occurred.connect(self.on_stack_error)
@@ -607,4 +615,31 @@ class StackerTab(QWidget):
 
     def _on_stack_lp_changed(self, val: int):
         self.lbl_lp_str.setText(f"{val}%")
+        
+    def on_progress_changed(self, value: int):
+        self.progress_bar.setValue(value)
+        
+        if hasattr(self, "_stack_start_time") and value > 3:
+            elapsed = time.perf_counter() - self._stack_start_time
+            total_est = (elapsed / value) * 100.0
+            remaining = max(0.0, total_est - elapsed)
+            
+            rem_m, rem_s = divmod(int(remaining), 60)
+            if rem_m > 0:
+                eta_str = f"ETA: ~{rem_m}m {rem_s:02d}s"
+            else:
+                eta_str = f"ETA: ~{rem_s}s"
+                
+            self.progress_bar.setFormat(f"%p%  ({eta_str})")
+        else:
+            self.progress_bar.setFormat("%p%")
+
+    def on_stacking_finished(self, out_path: str):
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("Completado 100%")
+        # Resto de tu lógica para habilitar botones, mostrar mensaje, etc.
+
+    def on_stacking_error(self, err_msg: str):
+        self.progress_bar.setFormat("Error")
+        # Resto de tu lógica de error existente
         

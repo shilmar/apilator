@@ -10,8 +10,6 @@ from concurrent.futures import ProcessPoolExecutor
 from astropy.io import fits
 from core.gpu_backend import is_gpu_enabled
 
-
-
 try:
     import cupy as cp
     if cp.cuda.runtime.getDeviceCount() > 0:
@@ -69,22 +67,18 @@ def create_master_dark(dark_paths: list) -> np.ndarray:
     if not dark_paths:
         return None
 
-    # Cargar cada dark una única vez en memoria
     loaded_darks = []
     for path in dark_paths:
         img = load_image_as_float32(path)
         loaded_darks.append(img)
 
-    # Si solo hay un dark, se devuelve directamente sin calcular mediana
     if len(loaded_darks) == 1:
         return loaded_darks[0]
 
-    # Apilar en un array 4D: (N, H, W, C)
     stack = np.stack(loaded_darks, axis=0)
     del loaded_darks
     gc.collect()
 
-    # Cálculo directo de la mediana a lo largo del eje temporal
     master_dark = np.median(stack, axis=0).astype(np.float32)
     del stack
     gc.collect()
@@ -97,8 +91,6 @@ def calibrate_light(light_img: np.ndarray, master_dark: np.ndarray = None) -> np
         return light_img
     return np.maximum(0.0, light_img - master_dark)
 
-
-# --- Motores de Reducción de Polución en Cuadros Individuales ---
 
 def estimate_frame_background_dome(img_rgb: np.ndarray, sky_mask: np.ndarray = None) -> np.ndarray:
     """
@@ -147,7 +139,7 @@ def preprocess_subframe_lp(
 
     h, w, c = frame_rgb.shape
 
-    # 1. Modo Sequator: Sustracción del domo de fondo por cuadro
+    # Modo Sequator: Sustracción del domo de fondo por cuadro
     if method == "sequator_subtraction":
         bg_dome = estimate_frame_background_dome(frame_rgb, sky_mask=sky_mask)
         pedestal = np.percentile(frame_rgb, 5, axis=(0, 1))
@@ -158,7 +150,7 @@ def preprocess_subframe_lp(
             return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
         return np.clip(corrected, 0.0, 1.0).astype(np.float32)
 
-    # 2. Modo Normalización Fotométrica Local
+    # Modo Normalización Fotométrica Local
     elif method == "local_norm" and ref_stats is not None:
         curr_median = np.median(frame_rgb, axis=(0, 1))
         target_median = ref_stats.get('median', curr_median)
@@ -256,25 +248,150 @@ def register_consecutive_homography(prev_kp, prev_desc, prev_gray, curr_img, sky
     return H_matrix, num_inliers, curr_kp, curr_desc, curr_gray
 
 
-def _process_single_chunk(args):
-    file_paths, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
-    actual_rows = y_end - y_start
-    bytes_per_row = w * c * 4
-    current_read_bytes = actual_rows * bytes_per_row
-    offset = y_start * bytes_per_row
+def save_frame_float32(filepath: str, img_float32: np.ndarray):
+    raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
+    with open(filepath, "wb") as f:
+        f.write(raw_data.tobytes())
+    del raw_data
 
-    n_frames = len(file_paths)
+
+def align_single_light_task(args: tuple) -> dict:
+    """
+    Tarea aislada para ProcessPoolExecutor: procesa y alinea un cuadro de luz contra la referencia.
+    Soporta almacenamiento en disco (.bin) o retorno directo en memoria RAM.
+    """
+    (
+        idx, path, total_lights, temp_dir, mode, master_dark,
+        ref_kps_pts, ref_desc, norm_type, ref_gray,
+        w, h, sky_mask, lp_method, lp_strength, ref_stats,
+        use_ram_buffer
+    ) = args
+
+    filename = os.path.basename(path)
+    res = {
+        "idx": idx,
+        "filename": filename,
+        "success": False,
+        "error": None,
+        "sky_data": None,   # Ruta .bin si es disco, np.ndarray si es RAM
+        "gnd_data": None,   # Ruta .bin si es disco, np.ndarray si es RAM
+        "inliers": 0,
+        "dx": 0.0,
+        "dy": 0.0
+    }
+
+    try:
+        raw_frame = load_image_as_float32(path)
+        calibrated_frame = calibrate_light(raw_frame, master_dark)
+
+        curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
+        if curr_desc is None or len(curr_kp) < 15:
+            raise RuntimeError(f"Solo se detectaron {len(curr_kp) if curr_kp else 0} estrellas.")
+
+        bf = cv2.BFMatcher(norm_type, crossCheck=False)
+        matches = bf.knnMatch(ref_desc, curr_desc, k=2)
+        good = [m for m, n in matches if len((m, n)) == 2 and m.distance < 0.78 * n.distance]
+
+        if len(good) < 10:
+            raise RuntimeError(f"Correspondencias insuficientes con la referencia ({len(good)} pares).")
+
+        curr_gray = cv2.cvtColor((calibrated_frame * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        ref_matched_kps = [cv2.KeyPoint(ref_kps_pts[m.queryIdx][0], ref_kps_pts[m.queryIdx][1], 1.0) for m in good]
+        curr_matched_kps = [curr_kp[m.trainIdx] for m in good]
+
+        dst_pts = refine_star_centroids(ref_gray, ref_matched_kps)
+        src_pts = refine_star_centroids(curr_gray, curr_matched_kps)
+
+        del curr_gray, curr_kp, curr_desc, matches, good
+
+        H_matrix, inliers = cv2.findHomography(
+            src_pts, dst_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=2.0,
+            maxIters=5000,
+            confidence=0.995
+        )
+
+        if H_matrix is None:
+            H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+            if H_aff is None:
+                raise RuntimeError("Fallo RANSAC en homografía/afín.")
+            H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
+
+        num_inliers = int(np.sum(inliers)) if inliers is not None else 0
+        del dst_pts, src_pts, inliers
+
+        warped = cv2.warpPerspective(
+            calibrated_frame, H_matrix, (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REFLECT
+        )
+        del calibrated_frame
+
+        warped_processed = preprocess_subframe_lp(
+            warped,
+            method=lp_method,
+            strength=lp_strength,
+            sky_mask=sky_mask,
+            ref_stats=ref_stats
+        )
+        del warped
+
+        if use_ram_buffer:
+            res["sky_data"] = np.ascontiguousarray(warped_processed, dtype=np.float32)
+            if mode == "fixed_tripod":
+                res["gnd_data"] = np.ascontiguousarray(raw_frame, dtype=np.float32)
+        else:
+            p_sky = os.path.join(temp_dir, f"sky_{idx-1:04d}.bin")
+            save_frame_float32(p_sky, warped_processed)
+            res["sky_data"] = p_sky
+
+            if mode == "fixed_tripod":
+                p_gnd = os.path.join(temp_dir, f"gnd_{idx-1:04d}.bin")
+                save_frame_float32(p_gnd, raw_frame)
+                res["gnd_data"] = p_gnd
+
+        del warped_processed, raw_frame
+
+        res["success"] = True
+        res["inliers"] = num_inliers
+        res["dx"] = float(H_matrix[0, 2])
+        res["dy"] = float(H_matrix[1, 2])
+        gc.collect()
+
+    except Exception as exc:
+        res["error"] = str(exc)
+
+    return res
+
+
+def _process_single_chunk(args):
+    """
+    Procesa un bloque de filas en CPU. Soporta origen en disco (.bin) o RAM (np.ndarray).
+    """
+    frames_source, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
+    actual_rows = y_end - y_start
+    n_frames = len(frames_source)
+    is_ram_mode = isinstance(frames_source[0], np.ndarray)
+
     sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
 
-    for i, f in enumerate(file_paths):
-        with open(f, "rb") as fp:
-            fp.seek(offset)
-            raw_bytes = fp.read(current_read_bytes)
-            sub_stack[i] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
+    if is_ram_mode:
+        for i, arr in enumerate(frames_source):
+            sub_stack[i] = arr[y_start:y_end]
+    else:
+        bytes_per_row = w * c * 4
+        current_read_bytes = actual_rows * bytes_per_row
+        offset = y_start * bytes_per_row
+        for i, f in enumerate(frames_source):
+            with open(f, "rb") as fp:
+                fp.seek(offset)
+                raw_bytes = fp.read(current_read_bytes)
+                sub_stack[i] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
 
     chunk_result = np.empty((actual_rows, w, c), dtype=np.float32)
 
-    # Si se selecciona Rechazo Asimétrico / Min-Sigma
+    # Modo Min-Rejection
     if lp_method == "min_rejection" and lp_strength > 1e-4:
         target_p = max(5.0, 50.0 - (lp_strength * 40.0))
         for ch in range(c):
@@ -314,7 +431,7 @@ def _process_single_chunk(args):
 
 
 def parallel_stream_stack(
-    file_paths: list, 
+    frames_source: list, 
     shape: tuple, 
     chunk_rows: int = 1200, 
     kappa: float = 2.2, 
@@ -328,10 +445,10 @@ def parallel_stream_stack(
     tasks = []
     for y in range(0, h, chunk_rows):
         y_end = min(y + chunk_rows, h)
-        tasks.append((file_paths, y, y_end, w, c, kappa, lp_method, lp_strength))
+        tasks.append((frames_source, y, y_end, w, c, kappa, lp_method, lp_strength))
 
     if max_workers is None:
-        max_workers = max(1, os.cpu_count() - 1)
+        max_workers = max(1, min(4, os.cpu_count() or 4))
 
     ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
@@ -384,7 +501,7 @@ def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = 
 
 
 def stream_stack_auto(
-    file_paths: list, 
+    frames_source: list, 
     shape: tuple, 
     chunk_rows: int = 1000, 
     kappa: float = 2.2,
@@ -392,35 +509,42 @@ def stream_stack_auto(
     lp_strength: float = 0.5,
     use_gpu: bool = None
 ) -> np.ndarray:
+    """
+    Apilamiento por streaming automático con fallback.
+    Acepta tanto listas de archivos en disco (.bin) como listas de matrices NumPy en RAM.
+    """
     h, w, c = shape
+    n_frames = len(frames_source)
+    is_ram_mode = isinstance(frames_source[0], np.ndarray)
 
-    # Si no se pasa explícitamente, consulta el backend global
     if use_gpu is None:
         use_gpu = is_gpu_enabled()
 
-    # Solo usa GPU si la tarjeta está disponible Y el usuario no la ha desactivado
     if use_gpu and HAS_GPU:
         try:
             stacked_out = np.zeros((h, w, c), dtype=np.float32)
             bytes_per_row = w * c * 4
-            n_frames = len(file_paths)
 
             for y in range(0, h, chunk_rows):
                 y_end = min(y + chunk_rows, h)
                 actual_rows = y_end - y
-                current_read_bytes = actual_rows * bytes_per_row
-                offset = y * bytes_per_row
 
-                block_frames = []
-                for f in file_paths:
-                    with open(f, "rb") as fp:
-                        fp.seek(offset)
-                        raw_bytes = fp.read(current_read_bytes)
-                        frame_chunk = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
-                        block_frames.append(frame_chunk)
-
-                sub_stack = np.stack(block_frames, axis=0)
-                del block_frames
+                if is_ram_mode:
+                    sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
+                    for i, arr in enumerate(frames_source):
+                        sub_stack[i] = arr[y:y_end]
+                else:
+                    offset = y * bytes_per_row
+                    current_read_bytes = actual_rows * bytes_per_row
+                    block_frames = []
+                    for f in frames_source:
+                        with open(f, "rb") as fp:
+                            fp.seek(offset)
+                            raw_bytes = fp.read(current_read_bytes)
+                            frame_chunk = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
+                            block_frames.append(frame_chunk)
+                    sub_stack = np.stack(block_frames, axis=0)
+                    del block_frames
 
                 stacked_out[y:y_end, :, :] = _process_chunk_gpu(
                     sub_stack, 
@@ -431,117 +555,15 @@ def stream_stack_auto(
                 del sub_stack
 
             return stacked_out
-        except Exception as e:
-            # Fallback a CPU en caso de desbordamiento de VRAM u otro error en GPU
+        except Exception:
+            # Fallback seguro a CPU ante cualquier desbordamiento de memoria VRAM
             pass
 
     return parallel_stream_stack(
-        file_paths, 
+        frames_source, 
         shape, 
         chunk_rows=chunk_rows, 
         kappa=kappa,
         lp_method=lp_method,
         lp_strength=lp_strength
     )
-    
-# Añadir al final de core/stacking.py
-
-def align_single_light_task(args: tuple) -> dict:
-    """
-    Tarea aislada para ProcessPoolExecutor: procesa y alinea un cuadro de luz contra la referencia.
-    """
-    (
-        idx, path, total_lights, temp_dir, mode, master_dark,
-        ref_kps_pts, ref_desc, norm_type, ref_gray,
-        w, h, sky_mask, lp_method, lp_strength, ref_stats
-    ) = args
-
-    filename = os.path.basename(path)
-    res = {
-        "idx": idx,
-        "filename": filename,
-        "success": False,
-        "error": None,
-        "p_sky": None,
-        "p_gnd": None,
-        "inliers": 0,
-        "dx": 0.0,
-        "dy": 0.0
-    }
-
-    try:
-        raw_frame = load_image_as_float32(path)
-        calibrated_frame = calibrate_light(raw_frame, master_dark)
-
-        curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
-        if curr_desc is None or len(curr_kp) < 15:
-            raise RuntimeError(f"Solo se detectaron {len(curr_kp) if curr_kp else 0} estrellas.")
-
-        bf = cv2.BFMatcher(norm_type, crossCheck=False)
-        matches = bf.knnMatch(ref_desc, curr_desc, k=2)
-        good = [m for m, n in matches if len((m, n)) == 2 and m.distance < 0.78 * n.distance]
-
-        if len(good) < 10:
-            raise RuntimeError(f"Correspondencias insuficientes con la referencia ({len(good)} pares).")
-
-        curr_gray = cv2.cvtColor((calibrated_frame * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        dst_pts = refine_star_centroids(ref_gray, [cv2.KeyPoint(pt[0], pt[1], 1) for pt in [ref_kps_pts[m.queryIdx] for m in good]])
-        src_pts = refine_star_centroids(curr_gray, [curr_kp[m.trainIdx] for m in good])
-
-        H_matrix, inliers = cv2.findHomography(
-            src_pts, dst_pts,
-            method=cv2.RANSAC,
-            ransacReprojThreshold=2.0,
-            maxIters=5000,
-            confidence=0.995
-        )
-
-        if H_matrix is None:
-            H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
-            if H_aff is None:
-                raise RuntimeError("Fallo RANSAC en homografía/afín.")
-            H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
-
-        num_inliers = int(np.sum(inliers)) if inliers is not None else 0
-
-        warped = cv2.warpPerspective(
-            calibrated_frame, H_matrix, (w, h),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_REFLECT
-        )
-
-        warped_processed = preprocess_subframe_lp(
-            warped,
-            method=lp_method,
-            strength=lp_strength,
-            sky_mask=sky_mask,
-            ref_stats=ref_stats
-        )
-
-        p_sky = os.path.join(temp_dir, f"sky_{idx-1}.bin")
-        save_frame_float32(p_sky, warped_processed)
-        res["p_sky"] = p_sky
-
-        if mode == "fixed_tripod":
-            p_gnd = os.path.join(temp_dir, f"gnd_{idx-1}.bin")
-            save_frame_float32(p_gnd, raw_frame)
-            res["p_gnd"] = p_gnd
-
-        res["success"] = True
-        res["inliers"] = num_inliers
-        res["dx"] = float(H_matrix[0, 2])
-        res["dy"] = float(H_matrix[1, 2])
-
-        del warped, warped_processed, raw_frame, calibrated_frame
-        gc.collect()
-
-    except Exception as exc:
-        res["error"] = str(exc)
-
-    return res
-    
-def save_frame_float32(filepath: str, img_float32: np.ndarray):
-    raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
-    with open(filepath, "wb") as f:
-        f.write(raw_data.tobytes())
-    del raw_data

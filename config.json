@@ -5,5 +5,6 @@
     "preview_max_dim": 1500,
     "export_format_default": "TIFF 16-bit (*.tif *.tiff)",
     "use_gpu": true,
-    "cpu_workers": 4
+    "cpu_workers": 4,
+    "storage_strategy": "ram"
 }

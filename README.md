@@ -4,27 +4,6 @@
 
 ---
 
-## Novedades de la versión 0.5.0
-
-Esta versión optimiza los cuellos de botella del pipeline de apilado, logrando una **reducción de más del 44% en el tiempo de procesamiento total** sin sacrificar precisión subpíxel ni alterar los algoritmos matemáticos de rechazo.
-
-### Rendimiento y Paralelización
-- **Alineación concurrente de tomas (Lights):** La decodificación RAW (`rawpy`), detección de estrellas con ORB y homografía RANSAC ahora se ejecutan en paralelo mediante `ProcessPoolExecutor`. El tiempo medio por toma desciende de **2.76s a 1.28s**.
-- **Generación optimizada de Master Dark:** Se elimina la relectura redundante de archivos RAW en disco. Las tomas de calibración se procesan en memoria una única vez, reduciendo la fase de **27.3s a 6.3s (-77%)**.
-- **Control dinámico de concurrencia:** Selector configurable de hilos/procesos de CPU en la pestaña de Ajustes para balancear el consumo de memoria RAM y núcleos de la CPU.
-- **Conmutación real CPU / GPU CUDA:** Vinculación efectiva del backend de aceleración por hardware con la interfaz gráfica y el motor de integración.
-
-### Correcciones y Estabilidad
-- Garantizada la composición final en memoria (`final_composite`) para evitar pérdidas de referencia previas al guardado TIFF.
-- Serialización de estructuras estelares para plena compatibilidad con el entorno de subprocesos (`spawn`) en Windows.
-- Telemetría de alta resolución integrada (`time.perf_counter()`) para desglose y trazabilidad de tiempos por fase.
-
----
-**Benchmark de referencia (31 Lights + 4 Darks):**
-- v0.4.1: ~2m 28s
-- v0.5.0: ~1m 23s (~44% de reducción de tiempo)
-
-
 ## Características Principales
 
 ### 1. Apilado Diferencial Cielo / Suelo
@@ -85,10 +64,10 @@ apilator/
   - `rawpy` (decodificación de archivos RAW de cámara)
   - `tifffile` (lectura y escritura de imágenes TIFF de alta profundidad)
   - `astropy` (gestión de archivos FITS astronómicos)
+  - `imagecodecs` ()
   - *(Opcional)* `cupy` (aceleración por GPU NVIDIA CUDA)
 - **Binarios Externos:**
   - Ejecutables de StarNet++ CLI y GraXpert configurados en el entorno.
-
 ---
 
 
@@ -102,7 +81,7 @@ cd apilator
 pip install -r requirements.txt
 
 O instalando manualmente los paquetes requeridos:
-pip install numpy scipy opencv-python PySide6 tifffile rawpy matplotlib
+pip install numpy scipy opencv-python PySide6 tifffile rawpy matplotlib astropy imagecodecs
 
 ### 3. Aceleracion GPU (Opcional - NVIDIA CUDA)
 Si dispones de una tarjeta grafica NVIDIA, puedes habilitar el procesamiento acelerado instalando la version de CuPy adecuada a tus controladores CUDA:

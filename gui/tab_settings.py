@@ -3,7 +3,7 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, 
     QLineEdit, QPushButton, QFileDialog, QMessageBox, QDoubleSpinBox,
-    QSpinBox, QCheckBox
+    QSpinBox, QCheckBox, QComboBox
 )
 from core.config_manager import load_config, save_config
 from core.gpu_backend import is_cupy_installed, is_gpu_enabled, set_gpu_enabled, get_gpu_name
@@ -91,20 +91,52 @@ class SettingsTab(QWidget):
         row_cpu = QHBoxLayout()
         row_cpu.addWidget(QLabel("Hilos / Procesos simultáneos de CPU:"))
 
-        total_cores = os.cpu_count() or 4
-        # Valor recomendado por defecto: la mitad de los núcleos o máximo 4-6 para equilibrar RAM y velocidad
-        default_workers = max(1, min(total_cores - 1, 4))
-
+        # En el grupo de rendimiento:
         self.spin_cpu_workers = QSpinBox()
-        self.spin_cpu_workers.setRange(1, total_cores)
-        self.spin_cpu_workers.setValue(int(self.cfg.get("cpu_workers", default_workers)))
-        self.spin_cpu_workers.setToolTip(f"Hilos concurrentes para descompresión RAW y alineación (Detectados: {total_cores})")
+        self.spin_cpu_workers.setRange(1, 4)  # <-- Tope máximo fijado en 4
+        self.spin_cpu_workers.setValue(int(self.cfg.get("cpu_workers", 4)))
+        self.spin_cpu_workers.setToolTip(
+            "Número de procesos simultáneos para decodificación RAW y alineación.\n"
+            "Optimizado a un máximo de 4 hilos para equilibrar I/O de disco y rendimiento."
+        )
 
         row_cpu.addWidget(self.spin_cpu_workers)
         row_cpu.addStretch()
         layout_perf.addLayout(row_cpu)
         
-        # <-- AQUÍ ESTABA EL DETALLE QUE FALTABA:
+        # gui/tab_settings.py
+
+        # 1. Asegurar el límite máximo de CPU workers en 4
+        self.spin_cpu_workers.setRange(1, 4)
+        self.spin_cpu_workers.setToolTip(
+            "Número de procesos simultáneos para decodificación RAW y alineación (máximo 4)."
+        )
+
+        # 2. Selector de estrategia de almacenamiento
+        row_storage = QHBoxLayout()
+        lbl_storage = QLabel("Almacenamiento intermedio:")
+        self.combo_storage = QComboBox()
+        self.combo_storage.addItem("Automático (según RAM disponible)", "auto")
+        self.combo_storage.addItem("Memoria RAM (Ultra-rápido)", "ram")
+        self.combo_storage.addItem("Caché en Disco (Bajo consumo)", "disk")
+
+        saved_storage = self.cfg.get("storage_strategy", "auto")
+        idx_storage = self.combo_storage.findData(saved_storage)
+        if idx_storage >= 0:
+            self.combo_storage.setCurrentIndex(idx_storage)
+
+        self.combo_storage.setToolTip(
+            "Define dónde se mantienen los cuadros alineados antes del apilado final:\n"
+            "- RAM: Elimina escrituras y lecturas a disco (.bin). Recomendado con 32 GB o más.\n"
+            "- Disco: Escribe archivos binarios temporales. Ideal para equipos con menos memoria.\n"
+            "- Automático: Evalúa la RAM física libre antes de empezar."
+        )
+
+        row_storage.addWidget(lbl_storage)
+        row_storage.addWidget(self.combo_storage)
+        row_storage.addStretch()
+        layout_perf.addLayout(row_storage)  # o el layout de rendimiento correspondiente
+        
         main_layout.addWidget(grp_perf)
 
         # 4. Botón Guardar
@@ -130,6 +162,7 @@ class SettingsTab(QWidget):
         self.cfg["preview_max_dim"] = self.spin_proxy.value()
         self.cfg["use_gpu"] = self.chk_gpu.isChecked()
         self.cfg["cpu_workers"] = self.spin_cpu_workers.value()
+        self.cfg["storage_strategy"] = self.combo_storage.currentData()
         save_config(self.cfg)
         QMessageBox.information(self, "Ajustes", "Configuración guardada correctamente en config.json.")
         
