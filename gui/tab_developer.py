@@ -918,6 +918,27 @@ class DeveloperTab(QWidget):
 
     def on_starnet_success(self, starless_img: np.ndarray, stars_img: np.ndarray):
         self.btn_starnet.setEnabled(True)
+
+        # Purga de falsos positivos en el suelo/árbol mediante la máscara de cielo
+        sky_mask = getattr(self, "sky_mask", None)
+        if sky_mask is not None and stars_img is not None:
+            h, w = stars_img.shape[:2]
+            mask = sky_mask
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+
+            if mask.ndim == 2:
+                mask_3d = mask[..., np.newaxis]
+            else:
+                mask_3d = mask
+
+            # 1. Lo que StarNet creyó que eran estrellas dentro del suelo vuelve al starless (fondo)
+            # para no perder la textura ni el brillo natural de las ramas
+            starless_img = starless_img + (stars_img * (1.0 - mask_3d))
+
+            # 2. La capa de estrellas queda estrictamente restringida al cielo
+            stars_img = stars_img * mask_3d
+
         self.image_starless = np.ascontiguousarray(starless_img, dtype=np.float32)
         self.image_stars = np.ascontiguousarray(stars_img, dtype=np.float32)
 
@@ -933,7 +954,7 @@ class DeveloperTab(QWidget):
 
         self._generate_preview_proxy()
         self.update_stretch_preview()
-        self.log_message("[STARNET] Estrellas separadas en lineal. Capas activadas.")
+        self.log_message("[STARNET] Estrellas separadas en lineal y purgadas con máscara de cielo. Capas activadas.")
         
     def on_stars_slider_changed(self, val: int):
         self.star_intensity = val / 100.0

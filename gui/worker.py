@@ -43,7 +43,6 @@ def evaluate_storage_mode(strategy: str, num_frames: int, h: int, w: int, c: int
     if strategy == "ram":
         return True
 
-    # Estrategia 'auto':
     try:
         import psutil
         free_bytes = psutil.virtual_memory().available
@@ -55,23 +54,49 @@ def evaluate_storage_mode(strategy: str, num_frames: int, h: int, w: int, c: int
         return False
 
 
+def _terminate_executor_processes(executor: ProcessPoolExecutor):
+    """Fuerza la terminación inmediata de todos los procesos hijos del pool."""
+    try:
+        for pid, process in executor._processes.items():
+            process.terminate()
+            process.join(timeout=0.1)
+    except Exception:
+        pass
+
+
 class StackingWorker(QThread):
     progress_changed = Signal(int)
     status_changed = Signal(str)
     finished_success = Signal(str)
     error_occurred = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self.config = config
         self._is_cancelled = False
+        self._executor = None
 
     def cancel(self):
+        """Solicita la parada inmediata del worker y de los subprocesos."""
         self._is_cancelled = True
+        self.status_changed.emit("Deteniendo tareas y liberando recursos...")
+        if self._executor is not None:
+            try:
+                _terminate_executor_processes(self._executor)
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
 
     def run(self):
         temp_dir = None
         t_global_start = time.perf_counter()
+        sky_frames_collection = []
+        ground_frames_collection = []
+
         try:
             lights = self.config.get("lights", [])
             darks = self.config.get("darks", [])
@@ -84,12 +109,15 @@ class StackingWorker(QThread):
             lp_strength = float(self.config.get("lp_strength", 0.5))
             use_gpu = self.config.get("use_gpu", True) and HAS_GPU
             
-            # Salvaguarda estricta: entre 1 y 4 hilos de proceso
             cpu_workers = min(4, max(1, int(self.config.get("cpu_workers", 4))))
             storage_strategy = self.config.get("storage_strategy", "auto")
 
             if len(lights) < 2:
                 self.error_occurred.emit("Se necesitan al menos 2 tomas de luz para apilar.")
+                return
+
+            if self._is_cancelled:
+                self.cancelled.emit()
                 return
 
             self.status_changed.emit("Iniciando preparación del entorno temporal...")
@@ -106,10 +134,19 @@ class StackingWorker(QThread):
                 self.status_changed.emit(f"[Fase 1/4] Generando Master Dark a partir de {len(darks)} tomas...")
                 self.progress_changed.emit(3)
                 master_dark = create_master_dark(darks)
+                
+                if self._is_cancelled:
+                    self.cancelled.emit()
+                    return
+
                 dt_darks = time.perf_counter() - t0_darks
                 self.status_changed.emit(f"-> Master Dark completado en {dt_darks:.1f}s.")
             else:
                 self.status_changed.emit("[Fase 1/4] Sin tomas Dark. Omitiendo calibración térmica.")
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
 
             self.progress_changed.emit(10)
 
@@ -137,6 +174,10 @@ class StackingWorker(QThread):
             if ref_desc is None or len(ref_kp) < 15:
                 raise RuntimeError("No se detectaron suficientes estrellas en la toma de referencia para alinear.")
 
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             has_ground = (sky_mask is not None and mode == "fixed_tripod")
             use_ram_buffer = evaluate_storage_mode(
                 strategy=storage_strategy,
@@ -146,9 +187,6 @@ class StackingWorker(QThread):
             )
             storage_label = "Memoria RAM (Ultra-rápido)" if use_ram_buffer else "Caché en Disco (.bin)"
             self.status_changed.emit(f"-> Estrategia de almacenamiento activa: [{storage_label}]")
-
-            sky_frames_collection = []
-            ground_frames_collection = []
 
             ref_sky_processed = preprocess_subframe_lp(
                 ref_sky,
@@ -179,6 +217,10 @@ class StackingWorker(QThread):
             self.status_changed.emit(f"-> Referencia lista en {dt_ref:.1f}s.")
             self.progress_changed.emit(15)
 
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             # Sub-fase de alineación concurrente (15% -> 60%)
             t0_align = time.perf_counter()
             total_lights = len(lights)
@@ -201,13 +243,16 @@ class StackingWorker(QThread):
             completed_count = 0
             ctx = mp.get_context("spawn")
 
-            with ProcessPoolExecutor(max_workers=cpu_workers, mp_context=ctx) as executor:
-                futures = [executor.submit(align_single_light_task, t) for t in tasks]
+            self._executor = ProcessPoolExecutor(max_workers=cpu_workers, mp_context=ctx)
+            try:
+                futures = [self._executor.submit(align_single_light_task, t) for t in tasks]
 
                 for future in as_completed(futures):
                     if self._is_cancelled:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        self.status_changed.emit("Cancelado por el usuario.")
+                        _terminate_executor_processes(self._executor)
+                        self._executor.shutdown(wait=False, cancel_futures=True)
+                        self.status_changed.emit("Alineación cancelada por el usuario.")
+                        self.cancelled.emit()
                         return
 
                     completed_count += 1
@@ -227,6 +272,14 @@ class StackingWorker(QThread):
                         self.status_changed.emit(
                             f"[DESCARTADA] [{res['idx']}/{total_lights}] {res['filename']} -> {res['error']}"
                         )
+            finally:
+                if self._executor is not None:
+                    self._executor.shutdown(wait=False)
+                    self._executor = None
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
 
             aligned_results.sort(key=lambda r: r["idx"])
             for res in aligned_results:
@@ -234,6 +287,9 @@ class StackingWorker(QThread):
                     sky_frames_collection.append(res["sky_data"])
                     if res["gnd_data"] is not None:
                         ground_frames_collection.append(res["gnd_data"])
+
+            del aligned_results
+            gc.collect()
 
             dt_align = time.perf_counter() - t0_align
             self.status_changed.emit(
@@ -250,10 +306,13 @@ class StackingWorker(QThread):
             # ============================================================
             # FASE 3/4: INTEGRACIÓN MATEMÁTICA (Rango 60% -> 95%)
             # ============================================================
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             backend_label = "GPU CUDA (NVIDIA)" if use_gpu else "CPU Multi-Core"
             sky_target_pct = 78 if has_ground else 95
 
-            if self._is_cancelled: return
             self.status_changed.emit(
                 f"[Fase 3/4] Apilando Cielo ({len(sky_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f}, LP={lp_method})..."
             )
@@ -269,6 +328,12 @@ class StackingWorker(QThread):
                 lp_strength=lp_strength,
                 use_gpu=use_gpu
             )
+
+            if self._is_cancelled:
+                del sky_stacked
+                self.cancelled.emit()
+                return
+
             dt_stack_sky = time.perf_counter() - t0_stack_sky
             self.status_changed.emit(f"-> Apilado de cielo completado en {dt_stack_sky:.1f}s.")
             self.progress_changed.emit(sky_target_pct)
@@ -277,7 +342,11 @@ class StackingWorker(QThread):
 
             # Suelo: 78% -> 95%
             if has_ground:
-                if self._is_cancelled: return
+                if self._is_cancelled:
+                    del final_composite
+                    self.cancelled.emit()
+                    return
+
                 self.status_changed.emit(f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
                 self.progress_changed.emit(80)
 
@@ -289,6 +358,12 @@ class StackingWorker(QThread):
                     kappa=kappa,
                     use_gpu=use_gpu
                 )
+
+                if self._is_cancelled:
+                    del ground_stacked, final_composite
+                    self.cancelled.emit()
+                    return
+
                 dt_stack_gnd = time.perf_counter() - t0_stack_gnd
                 self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
                 self.progress_changed.emit(95)
@@ -296,26 +371,21 @@ class StackingWorker(QThread):
                 # ============================================================
                 # FASE 4/4: COMPOSICIÓN Y GUARDADO (Rango 95% -> 100%)
                 # ============================================================
+                if self._is_cancelled:
+                    del ground_stacked, final_composite
+                    self.cancelled.emit()
+                    return
+
                 t0_comp = time.perf_counter()
                 self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
                 self.progress_changed.emit(96)
 
                 raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
-
-                # Transición suave microscópica (sigma 0.8 - 1.0) para que Claridad no cree halos
                 smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
-                if smooth_mask.ndim == 2:
-                    mask_3d = smooth_mask[..., np.newaxis]
-                else:
-                    mask_3d = smooth_mask
+                mask_3d = smooth_mask[..., np.newaxis] if smooth_mask.ndim == 2 else smooth_mask
 
-                # Fusión lineal continua
                 base_composite = (sky_stacked * mask_3d) + (ground_stacked * (1.0 - mask_3d))
 
-                # Protección de silueta sin bordes duros:
-                # En la franja de transición (donde mask_3d está entre 0.05 y 0.95), 
-                # si el suelo estático es más oscuro (ramas/hojas), permitimos que preserve
-                # la silueta natural sin crear un escalón de contraste artificial
                 transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
                 final_composite = np.where(
                     transition_zone & (ground_stacked < base_composite),
@@ -331,6 +401,11 @@ class StackingWorker(QThread):
 
             if final_composite is not sky_stacked:
                 del sky_stacked
+
+            if self._is_cancelled:
+                del final_composite
+                self.cancelled.emit()
+                return
 
             # Guardado TIFF final
             t0_io = time.perf_counter()
@@ -353,8 +428,14 @@ class StackingWorker(QThread):
             self.finished_success.emit(output_path)
 
         except Exception as exc:
-            self.error_occurred.emit(str(exc))
+            if not self._is_cancelled:
+                self.error_occurred.emit(str(exc))
+            else:
+                self.cancelled.emit()
         finally:
+            sky_frames_collection.clear()
+            ground_frames_collection.clear()
+            gc.collect()
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -363,31 +444,48 @@ class GraXpertWorker(QThread):
     finished_success = Signal(np.ndarray)
     error_occurred = Signal(str)
     status_changed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, image_rgb: np.ndarray, sky_mask: np.ndarray = None, smoothing: float = 0.5, parent=None):
         super().__init__(parent)
         self.image_rgb = image_rgb
         self.sky_mask = sky_mask
         self.smoothing = smoothing
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     def run(self):
         try:
             self.status_changed.emit("Invocando GraXpert AI para extracción de fondo...")
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             corrected = run_graxpert_background_extraction(
                 self.image_rgb, 
                 sky_mask=self.sky_mask, 
                 smoothing=self.smoothing
             )
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             self.status_changed.emit("Extracción de gradiente completada con éxito.")
             self.finished_success.emit(corrected)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            if not self._is_cancelled:
+                self.error_occurred.emit(str(e))
+            else:
+                self.cancelled.emit()
 
 
 class StarNetWorker(QThread):
     status_changed = Signal(str)
     finished_success = Signal(object, object)
     error_occurred = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, img_rgb: np.ndarray, sky_mask: np.ndarray = None, stride: int = 256, custom_exe: str = None, parent=None):
         super().__init__(parent)
@@ -395,9 +493,17 @@ class StarNetWorker(QThread):
         self.sky_mask = sky_mask
         self.stride = stride
         self.custom_exe = custom_exe
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     def run(self):
         try:
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             starless, stars = run_starnet(
                 self.img_rgb,
                 sky_mask=self.sky_mask,
@@ -405,6 +511,13 @@ class StarNetWorker(QThread):
                 starnet_exe=self.custom_exe,
                 log_callback=self.status_changed.emit
             )
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
+
             self.finished_success.emit(starless, stars)
         except Exception as exc:
-            self.error_occurred.emit(str(exc))
+            if not self._is_cancelled:
+                self.error_occurred.emit(str(exc))
+            else:
+                self.cancelled.emit()

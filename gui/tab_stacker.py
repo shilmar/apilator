@@ -281,7 +281,8 @@ class StackerTab(QWidget):
         self.btn_run.setStyleSheet(
             "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
         )
-        self.btn_run.clicked.connect(self.start_stacking)
+        # Cambiamos la conexión directa por el handler dinámico
+        self.btn_run.clicked.connect(self._on_btn_run_clicked)
         left_layout.addWidget(self.btn_run)
 
         splitter.addWidget(left_panel)
@@ -568,16 +569,20 @@ class StackerTab(QWidget):
         if not out_path: 
             return
 
-        # --- Iniciar temporizador ---
-        # Guardar tiempo de inicio para calcular ETA
         self._stack_start_time = time.perf_counter()
-
         self.last_stacked_output_path = out_path
-        self.btn_run.setEnabled(False)
+
+        # Cambiar apariencia a modo CANCELAR
+        self._set_ui_busy(True)
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("CANCELAR APILADO")
+        self.btn_run.setStyleSheet(
+            "font-weight: bold; font-size: 13px; background-color: #c62828; color: white;"
+        )
+
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Iniciando... %p%")
 
-        # Mapeo del algoritmo seleccionado a clave interna
         lp_mode_idx = self.combo_lp_algo.currentIndex()
         lp_methods = ["standard", "sequator_subtraction", "min_rejection", "local_norm"]
         selected_lp_method = lp_methods[lp_mode_idx]
@@ -606,24 +611,23 @@ class StackerTab(QWidget):
         }
 
         self.worker = StackingWorker(cfg)
-        # CORRECTO
         self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.status_changed.connect(self.log_message)
         self.worker.finished_success.connect(self.on_stack_success)
         self.worker.error_occurred.connect(self.on_stack_error)
+        self.worker.cancelled.connect(self.on_stack_cancelled)  # <--- NUEVA CONEXIÓN
         self.worker.start()
 
     def on_stack_success(self, path):
-        self.btn_run.setEnabled(True)
+        self._reset_run_button()
 
-        # --- Cálculo y formateo del tiempo total ---
-        if hasattr(self, 'stack_start_time') and self.stack_start_time is not None:
-            elapsed = time.perf_counter() - self.stack_start_time
+        if hasattr(self, '_stack_start_time') and self._stack_start_time is not None:
+            elapsed = time.perf_counter() - self._stack_start_time
             mins = int(elapsed // 60)
             secs = elapsed % 60
             time_str = f"{mins}m {secs:.1f}s" if mins > 0 else f"{secs:.2f}s"
             self.log_message(f"[COMPLETADO] Tiempo total de apilado: {time_str}")
-            self.stack_start_time = None
+            self._stack_start_time = None
 
         self.log_message(f"[COMPLETADO] Imagen guardada en: {path}")
         QMessageBox.information(
@@ -633,10 +637,19 @@ class StackerTab(QWidget):
         self.stacking_finished.emit(path, self.computed_mask)
 
     def on_stack_error(self, err_msg):
-        self.btn_run.setEnabled(True)
-        self.stack_start_time = None           # Resetea el cronómetro
+        self._reset_run_button()
+        self._stack_start_time = None
+        self.progress_bar.setFormat("Error")
         self.log_message(f"[ERROR CRÍTICO] {err_msg}")
-        QMessageBox.critical(self, "Error durante el apilado", f"Ocurrió un error:\n{err_msg}")       
+        QMessageBox.critical(self, "Error durante el apilado", f"Ocurrió un error:\n{err_msg}")
+
+    def on_stack_cancelled(self):
+        """Maneja la finalización tras una interrupción manual."""
+        self._reset_run_button()
+        self._stack_start_time = None
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Apilado Cancelado")
+        self.log_message("[INFO] Proceso detenido con éxito. Recursos y memoria liberados.")  
 
     def _on_stack_lp_changed(self, val: int):
         self.lbl_lp_str.setText(f"{val}%")
@@ -722,3 +735,39 @@ class StackerTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
         self.txt_log.clear()
+        
+    def _set_ui_busy(self, busy: bool):
+        """Bloquea o desbloquea controles secundarios durante el procesamiento."""
+        self.tabs_files.setEnabled(not busy)
+        self.combo_mode.setEnabled(not busy)
+        self.spin_kappa.setEnabled(not busy)
+        self.combo_lp_algo.setEnabled(not busy)
+        self.slider_stack_lp.setEnabled(not busy)
+
+    def _on_btn_run_clicked(self):
+        """Alterna entre iniciar el apilado o cancelarlo según el estado del worker."""
+        if self.worker is not None and self.worker.isRunning():
+            self.cancel_stacking()
+        else:
+            self.start_stacking()
+
+    def cancel_stacking(self):
+        """Solicita la detención inmediata del proceso."""
+        if self.worker is not None and self.worker.isRunning():
+            self.btn_run.setEnabled(False)
+            self.btn_run.setText("CANCELANDO PROCESOS...")
+            self.btn_run.setStyleSheet(
+                "font-weight: bold; font-size: 13px; background-color: #555555; color: #aaaaaa;"
+            )
+            self.progress_bar.setFormat("Deteniendo... %p%")
+            self.log_message("[AVISO] Solicitando parada de tareas y liberación de memoria...")
+            self.worker.cancel()
+
+    def _reset_run_button(self):
+        """Devuelve el botón a su apariencia y comportamiento normal."""
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("INICIAR APILADO DUAL")
+        self.btn_run.setStyleSheet(
+            "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
+        )
+        self._set_ui_busy(False)
