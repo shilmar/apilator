@@ -12,6 +12,7 @@ __pycache__/
 *.DNG
 *.png
 *.mwstack
+*.bak
 .vscode/
 venv/
 env/

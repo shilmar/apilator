@@ -1,5 +1,9 @@
 # gui/tab_settings.py
+"""
+gui/tab_settings.py - Pestaña de configuración de hardware, rutas externas y parámetros generales.
+"""
 import os
+from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, 
     QLineEdit, QPushButton, QFileDialog, QMessageBox, QDoubleSpinBox,
@@ -10,25 +14,28 @@ from core.gpu_backend import is_cupy_installed, is_gpu_enabled, set_gpu_enabled,
 
 
 class SettingsTab(QWidget):
-    def __init__(self, parent=None):
+    """Pestaña para la gestión de preferencias globales de Apilator."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.cfg = load_config()
         user_wants_gpu = self.cfg.get("use_gpu", True)
         set_gpu_enabled(user_wants_gpu)
         self._setup_ui()
 
-    def _setup_ui(self):
+    def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
+        # -------------------------------------------------------------
         # 1. Grupo: Rutas de Herramientas Externas
+        # -------------------------------------------------------------
         grp_paths = QGroupBox("Rutas de Herramientas Externas")
         paths_layout = QVBoxLayout(grp_paths)
         paths_layout.setSpacing(10)
 
-        # StarNet++
-        paths_layout.addWidget(QLabel("Ruta al ejecutable de StarNet++ (starnet++.exe):"))
+        paths_layout.addWidget(QLabel("Ruta al ejecutable de StarNet++ (starnet2.exe / starnet++.exe):"))
         row_sn = QHBoxLayout()
         self.txt_starnet = QLineEdit(self.cfg.get("starnet_exe", ""))
         self.txt_starnet.setPlaceholderText("C:\\Program Files\\StarNetv2CLI_Win\\starnet++.exe")
@@ -41,12 +48,14 @@ class SettingsTab(QWidget):
 
         main_layout.addWidget(grp_paths)
 
-        # 2. Grupo: Valores por Defecto de Procesado
+        # -------------------------------------------------------------
+        # 2. Grupo: Parámetros Generales
+        # -------------------------------------------------------------
         grp_defaults = QGroupBox("Parámetros Generales")
         def_layout = QVBoxLayout(grp_defaults)
         def_layout.setSpacing(10)
 
-        # Kappa
+        # Factor Kappa
         row_k = QHBoxLayout()
         row_k.addWidget(QLabel("Factor Kappa por defecto (Apilado):"))
         self.spin_kappa = QDoubleSpinBox()
@@ -57,7 +66,7 @@ class SettingsTab(QWidget):
         row_k.addStretch()
         def_layout.addLayout(row_k)
 
-        # Resolución máxima de Proxy
+        # Dimensión máxima proxy
         row_px = QHBoxLayout()
         row_px.addWidget(QLabel("Dimensión máxima del proxy de previsualización (px):"))
         self.spin_proxy = QSpinBox()
@@ -70,9 +79,12 @@ class SettingsTab(QWidget):
 
         main_layout.addWidget(grp_defaults)
 
-        # 3. Grupo: Rendimiento y Aceleración por Hardware (GPU)
+        # -------------------------------------------------------------
+        # 3. Grupo: Rendimiento y Aceleración por Hardware
+        # -------------------------------------------------------------
         grp_perf = QGroupBox("Rendimiento y Aceleración por Hardware")
         layout_perf = QVBoxLayout(grp_perf)
+        layout_perf.setSpacing(10)
 
         self.chk_gpu = QCheckBox("Aceleración por GPU (CUDA / CuPy)")
         if is_cupy_installed():
@@ -86,35 +98,24 @@ class SettingsTab(QWidget):
             self.chk_gpu.setText("Aceleración por GPU no disponible (CuPy / CUDA no detectados - CPU forzada)")
 
         layout_perf.addWidget(self.chk_gpu)
-        
-        # Dentro del grupo grp_perf:
+
+        # Procesos concurrentes CPU
         row_cpu = QHBoxLayout()
         row_cpu.addWidget(QLabel("Hilos / Procesos simultáneos de CPU:"))
-
-        # En el grupo de rendimiento:
         self.spin_cpu_workers = QSpinBox()
-        self.spin_cpu_workers.setRange(1, 4)  # <-- Tope máximo fijado en 4
+        self.spin_cpu_workers.setRange(1, 4)
         self.spin_cpu_workers.setValue(int(self.cfg.get("cpu_workers", 4)))
         self.spin_cpu_workers.setToolTip(
             "Número de procesos simultáneos para decodificación RAW y alineación.\n"
             "Optimizado a un máximo de 4 hilos para equilibrar I/O de disco y rendimiento."
         )
-
         row_cpu.addWidget(self.spin_cpu_workers)
         row_cpu.addStretch()
         layout_perf.addLayout(row_cpu)
-        
-        # gui/tab_settings.py
 
-        # 1. Asegurar el límite máximo de CPU workers en 4
-        self.spin_cpu_workers.setRange(1, 4)
-        self.spin_cpu_workers.setToolTip(
-            "Número de procesos simultáneos para decodificación RAW y alineación (máximo 4)."
-        )
-
-        # 2. Selector de estrategia de almacenamiento
+        # Estrategia de almacenamiento intermedio
         row_storage = QHBoxLayout()
-        lbl_storage = QLabel("Almacenamiento intermedio:")
+        row_storage.addWidget(QLabel("Almacenamiento intermedio:"))
         self.combo_storage = QComboBox()
         self.combo_storage.addItem("Automático (según RAM disponible)", "auto")
         self.combo_storage.addItem("Memoria RAM (Ultra-rápido)", "ram")
@@ -132,14 +133,15 @@ class SettingsTab(QWidget):
             "- Automático: Evalúa la RAM física libre antes de empezar."
         )
 
-        row_storage.addWidget(lbl_storage)
         row_storage.addWidget(self.combo_storage)
         row_storage.addStretch()
-        layout_perf.addLayout(row_storage)  # o el layout de rendimiento correspondiente
-        
+        layout_perf.addLayout(row_storage)
+
         main_layout.addWidget(grp_perf)
 
+        # -------------------------------------------------------------
         # 4. Botón Guardar
+        # -------------------------------------------------------------
         btn_save = QPushButton("Guardar Cambios de Configuración")
         btn_save.setFixedHeight(40)
         btn_save.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
@@ -148,23 +150,30 @@ class SettingsTab(QWidget):
 
         main_layout.addStretch()
 
-    def _browse_starnet(self):
+    def _browse_starnet(self) -> None:
+        """Abre el explorador de archivos para localizar el ejecutable de StarNet."""
+        current_val = self.txt_starnet.text().strip()
+        start_dir = os.path.dirname(current_val) if current_val and os.path.exists(os.path.dirname(current_val)) else "C:\\Program Files"
+
         f, _ = QFileDialog.getOpenFileName(
             self, "Seleccionar ejecutable de StarNet++", 
-            "C:\\Program Files", "Ejecutables (*.exe);;Todos (*.*)"
+            start_dir, "Ejecutables (*.exe);;Todos (*.*)"
         )
         if f:
             self.txt_starnet.setText(f)
 
-    def save_settings(self):
+    def save_settings(self) -> None:
+        """Persiste las opciones seleccionadas en el archivo config.json."""
         self.cfg["starnet_exe"] = self.txt_starnet.text().strip()
         self.cfg["default_kappa"] = self.spin_kappa.value()
         self.cfg["preview_max_dim"] = self.spin_proxy.value()
         self.cfg["use_gpu"] = self.chk_gpu.isChecked()
         self.cfg["cpu_workers"] = self.spin_cpu_workers.value()
         self.cfg["storage_strategy"] = self.combo_storage.currentData()
+
         save_config(self.cfg)
         QMessageBox.information(self, "Ajustes", "Configuración guardada correctamente en config.json.")
-        
-    def on_gpu_toggled(self, checked: bool):
+
+    def on_gpu_toggled(self, checked: bool) -> None:
+        """Conmuta la bandera global de ejecución en GPU."""
         set_gpu_enabled(checked)

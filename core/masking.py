@@ -1,6 +1,12 @@
 # core/masking.py
+"""
+core/masking.py - Algoritmos de segmentación y refinamiento de máscaras cielo/suelo.
+Implementa segmentación híbrida mediante GrabCut asistido por luminancia y refinado guiado.
+"""
+from typing import Optional
 import cv2
 import numpy as np
+
 
 def refine_mask_guided(
     image_rgb: np.ndarray, 
@@ -9,69 +15,76 @@ def refine_mask_guided(
     iterations: int = 3
 ) -> np.ndarray:
     """
-    Refina la máscara cielo/suelo preservando ramitas y siluetas complejas mediante:
-    1. Estimación fotométrica de umbral entre cielo y vegetación.
-    2. GrabCut asistido por luminancia (sin restricciones arbitrarias de altura).
-    3. Refinado de bordes guiado en alta resolución.
+    Refina la máscara cielo/suelo preservando ramas finas y siluetas complejas mediante:
+    1. Análisis fotométrico entre trazos de cielo y suelo para calcular el umbral de silueta.
+    2. GrabCut iterativo asistido por máscara en resolución adaptativa.
+    3. Recuperación de micro-estructuras oscuras (ramas/follaje) y suavizado perimetral guiado.
+
+    Parámetros:
+        image_rgb (np.ndarray): Imagen base normalizada float32 [0.0, 1.0].
+        user_scribbles (np.ndarray): Matriz uint8 (0: no marcado, 1: suelo, 2: cielo).
+        feather_radius (int): Radio para el desenfoque gaussiano del perímetro (en píxeles).
+        iterations (int): Número de iteraciones del algoritmo GrabCut.
+
+    Retorna:
+        np.ndarray: Máscara continua float32 [0.0, 1.0] (1.0 = cielo, 0.0 = suelo).
     """
     h, w = user_scribbles.shape[:2]
     
-    # Si falta trazo de cielo (2) o de suelo (1), retorna cielo completo
+    # Si falta trazo de cielo (2) o de suelo (1), retorna cielo completo por defecto
     if not (np.any(user_scribbles == 1) and np.any(user_scribbles == 2)):
         return np.ones((h, w), dtype=np.float32)
 
-    # Convertir a escala de grises / luminancia
+    # 1. Luminancia normalizada
     if image_rgb.ndim == 3:
         gray = cv2.cvtColor(np.clip(image_rgb, 0.0, 1.0), cv2.COLOR_RGB2GRAY)
     else:
         gray = np.clip(image_rgb, 0.0, 1.0)
 
-    # 1. Análisis fotométrico de las semillas del usuario
+    # 2. Análisis fotométrico de las semillas del usuario
     sky_samples = gray[user_scribbles == 2]
     gnd_samples = gray[user_scribbles == 1]
 
-    sky_min = np.percentile(sky_samples, 5) if len(sky_samples) > 0 else 0.2
-    gnd_max = np.percentile(gnd_samples, 95) if len(gnd_samples) > 0 else 0.1
+    sky_min = float(np.percentile(sky_samples, 5)) if len(sky_samples) > 0 else 0.2
+    gnd_max = float(np.percentile(gnd_samples, 95)) if len(gnd_samples) > 0 else 0.1
 
     # Umbral de separación de silueta entre suelo y cielo
     split_thresh = (sky_min * 0.4) + (gnd_max * 0.6)
 
-    # 2. Inicializar matriz de GrabCut
+    # 3. Inicializar matriz de probabilidades de GrabCut
     gc_mask = np.full((h, w), cv2.GC_PR_FGD, dtype=np.uint8)
 
-    # Si el usuario dibujó una franja verde, todo lo que quede por encima del píxel verde más bajo
-    # en cada columna (o un margen de seguridad) se declara cielo seguro sin coste computacional
-    sky_ys = np.where(user_scribbles == 2)[0]
-    #if len(sky_ys) > 0:
-    #    min_sky_y = np.min(sky_ys)
-    #    # Todo lo que esté claramente por encima de donde empieza el cielo se marca seguro
-    #    gc_mask[:max(0, min_sky_y - 10), :] = cv2.GC_FGD
-    # test
-
-    # Marcar semillas del usuario
+    # Fijar semillas seguras del usuario
     gc_mask[user_scribbles == 1] = cv2.GC_BGD  # Suelo seguro
     gc_mask[user_scribbles == 2] = cv2.GC_FGD  # Cielo seguro
 
-    # Clasificar automáticamente estructuras oscuras (ramas, troncos) que contrastan con el fondo
+    # Clasificar como probable fondo las estructuras oscuras que contrastan con el cielo
     dark_silhouette = (gray <= split_thresh) & (user_scribbles == 0)
     gc_mask[dark_silhouette] = cv2.GC_PR_BGD
 
-    # Redimensionado conservando detalle para GrabCut
+    # 4. Redimensionado conservando detalle para optimizar el rendimiento de GrabCut
     max_dim = 1600.0
     scale = min(1.0, max_dim / max(h, w))
-    small_w = int(w * scale)
-    small_h = int(h * scale)
-
-    small_rgb_8u = (cv2.resize(image_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA) * 255.0).astype(np.uint8)
-    small_mask = cv2.resize(gc_mask, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+    
+    if scale < 1.0:
+        small_w = int(w * scale)
+        small_h = int(h * scale)
+        small_rgb_8u = (np.clip(cv2.resize(image_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA), 0.0, 1.0) * 255.0).astype(np.uint8)
+        small_mask = cv2.resize(gc_mask, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+    else:
+        small_rgb_8u = (np.clip(image_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        small_mask = gc_mask.copy()
 
     bgd_model = np.zeros((1, 65), np.float64)
     fgd_model = np.zeros((1, 65), np.float64)
 
     # GrabCut iterativo asistido
     cv2.grabCut(
-        small_rgb_8u, small_mask, None, 
-        bgd_model, fgd_model, 
+        small_rgb_8u, 
+        small_mask, 
+        None, 
+        bgd_model, 
+        fgd_model, 
         iterCount=max(1, iterations), 
         mode=cv2.GC_INIT_WITH_MASK
     )
@@ -82,29 +95,27 @@ def refine_mask_guided(
     ).astype(np.float32)
 
     # Reescalar la máscara base a la resolución nativa
-    mask_full = cv2.resize(refined_small, (w, h), interpolation=cv2.INTER_LINEAR)
+    if scale < 1.0:
+        mask_full = cv2.resize(refined_small, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        mask_full = refined_small
 
     # Forzar que los píxeles más oscuros que el umbral de silueta queden como suelo (ramas finas)
     tree_branches = (gray <= (split_thresh * 1.15)) & (user_scribbles != 2)
     mask_full[tree_branches] = 0.0
 
-    # 3. Refinado guiado de bordes para evitar artefactos duros
+    # 5. Suavizado y refinado guiado de bordes
     k = max(1, feather_radius)
     if k % 2 == 0:
         k += 1
 
     if k > 1:
-        # Suavizado suave en el límite sin difuminar la estructura interior
         feathered = cv2.GaussianBlur(mask_full, (k, k), sigmaX=k / 3.0)
-        # Mantener los trazos manuales y el interior del follaje intactos
+        # Mantener las semillas manuales del usuario con peso estricto
         feathered[user_scribbles == 2] = 1.0
         feathered[user_scribbles == 1] = 0.0
         mask_final = feathered
     else:
         mask_final = mask_full
-
-    # Erosionar ligeramente el cielo (1 a 3 px) para que el suelo se coma cualquier borde dudoso
-    #kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    #mask_final = cv2.erode(mask_final, kernel, iterations=1)
 
     return np.clip(mask_final, 0.0, 1.0).astype(np.float32)

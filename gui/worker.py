@@ -98,10 +98,13 @@ class StackingWorker(QThread):
         ground_frames_collection = []
 
         try:
+            # 1. Extraer PRIMERO todos los parámetros de self.config
             lights = self.config.get("lights", [])
             darks = self.config.get("darks", [])
             sky_mask = self.config.get("mask", None)
             mode = self.config.get("mode", "fixed_tripod")
+            ground_mode = self.config.get("ground_mode", "dual")
+            external_ground_path = self.config.get("external_ground_path", None)
             kappa = float(self.config.get("kappa", 2.2))
             output_path = self.config.get("output_path", "resultado_dual_32bit.tiff")
 
@@ -112,12 +115,11 @@ class StackingWorker(QThread):
             cpu_workers = min(4, max(1, int(self.config.get("cpu_workers", 4))))
             storage_strategy = self.config.get("storage_strategy", "auto")
 
+            # 2. AHORA SÍ: Definir las condiciones dependientes de esas variables
+            need_stack_ground = (sky_mask is not None and mode == "fixed_tripod" and ground_mode == "dual")
+
             if len(lights) < 2:
                 self.error_occurred.emit("Se necesitan al menos 2 tomas de luz para apilar.")
-                return
-
-            if self._is_cancelled:
-                self.cancelled.emit()
                 return
 
             self.status_changed.emit("Iniciando preparación del entorno temporal...")
@@ -196,16 +198,19 @@ class StackingWorker(QThread):
                 ref_stats=ref_stats
             )
 
+            # Guardamos la imagen de referencia sin alinear para usarla si el modo es "reference"
+            ref_raw_ground = ref_raw.copy() if (ground_mode == "reference" and sky_mask is not None) else None
+
             if use_ram_buffer:
                 sky_frames_collection.append(ref_sky_processed)
-                if mode == "fixed_tripod":
+                if need_stack_ground:
                     ground_frames_collection.append(ref_raw.copy())
             else:
                 p_sky_0 = os.path.join(temp_dir, "sky_0000.bin")
                 save_frame_float32(p_sky_0, ref_sky_processed)
                 sky_frames_collection.append(p_sky_0)
 
-                if mode == "fixed_tripod":
+                if need_stack_ground:
                     p_gnd_0 = os.path.join(temp_dir, "gnd_0000.bin")
                     save_frame_float32(p_gnd_0, ref_raw)
                     ground_frames_collection.append(p_gnd_0)
@@ -368,36 +373,70 @@ class StackingWorker(QThread):
                 self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
                 self.progress_changed.emit(95)
 
+                # Obtención de la capa de suelo según el modo
+                ground_layer = None
+
+                if sky_mask is not None and mode == "fixed_tripod":
+                    if ground_mode == "dual" and len(ground_frames_collection) >= 2:
+                        if self._is_cancelled:
+                            del sky_stacked
+                            self.cancelled.emit()
+                            return
+
+                        self.status_changed.emit(f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
+                        self.progress_changed.emit(80)
+
+                        t0_stack_gnd = time.perf_counter()
+                        ground_layer = stream_stack_auto(
+                            ground_frames_collection, 
+                            (h, w, c), 
+                            chunk_rows=800, 
+                            kappa=kappa,
+                            use_gpu=use_gpu
+                        )
+                        dt_stack_gnd = time.perf_counter() - t0_stack_gnd
+                        self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
+                    
+                    elif ground_mode == "reference" and ref_raw_ground is not None:
+                        self.status_changed.emit("[Fase 3/4] Usando suelo de la toma de referencia (sin promediar)...")
+                        ground_layer = ref_raw_ground
+
+                    elif ground_mode == "external" and external_ground_path:
+                        self.status_changed.emit(f"[Fase 3/4] Cargando suelo externo: {os.path.basename(external_ground_path)}...")
+                        ext_img = load_image_as_float32(external_ground_path)
+                        if ext_img.shape[:2] != (h, w):
+                            ext_img = cv2.resize(ext_img, (w, h), interpolation=cv2.INTER_LINEAR)
+                        ground_layer = ext_img
+
+                    self.progress_changed.emit(95)
+
                 # ============================================================
-                # FASE 4/4: COMPOSICIÓN Y GUARDADO (Rango 95% -> 100%)
+                # FASE 4/4: COMPOSICIÓN Y GUARDADO
                 # ============================================================
-                if self._is_cancelled:
-                    del ground_stacked, final_composite
-                    self.cancelled.emit()
-                    return
+                if ground_layer is not None:
+                    t0_comp = time.perf_counter()
+                    self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
+                    self.progress_changed.emit(96)
 
-                t0_comp = time.perf_counter()
-                self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
-                self.progress_changed.emit(96)
+                    raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
+                    smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
+                    mask_3d = smooth_mask[..., np.newaxis] if smooth_mask.ndim == 2 else smooth_mask
 
-                raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
-                smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
-                mask_3d = smooth_mask[..., np.newaxis] if smooth_mask.ndim == 2 else smooth_mask
+                    base_composite = (sky_stacked * mask_3d) + (ground_layer * (1.0 - mask_3d))
 
-                base_composite = (sky_stacked * mask_3d) + (ground_stacked * (1.0 - mask_3d))
+                    transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
+                    final_composite = np.where(
+                        transition_zone & (ground_layer < base_composite),
+                        ground_layer * (1.0 - mask_3d * 0.5) + base_composite * (mask_3d * 0.5),
+                        base_composite
+                    )
 
-                transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
-                final_composite = np.where(
-                    transition_zone & (ground_stacked < base_composite),
-                    ground_stacked * (1.0 - mask_3d * 0.5) + base_composite * (mask_3d * 0.5),
-                    base_composite
-                )
-
-                del ground_stacked, mask_3d, smooth_mask, base_composite
-                dt_comp = time.perf_counter() - t0_comp
-                self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
-            else:
-                self.status_changed.emit("[Fase 4/4] Modo sin suelo. Saltando composición de máscara.")
+                    del ground_layer, mask_3d, smooth_mask, base_composite
+                    dt_comp = time.perf_counter() - t0_comp
+                    self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
+                else:
+                    final_composite = sky_stacked
+                    self.status_changed.emit("[Fase 4/4] Sin capa de suelo. Saltando composición de máscara.")
 
             if final_composite is not sky_stacked:
                 del sky_stacked

@@ -71,6 +71,7 @@ class StackerTab(QWidget):
         self.project_mgr = ProjectManager()
         self.lights_list = []
         self.darks_list = []
+        self.ground_list = []  # <--- NUEVA LISTA
         self.computed_mask = None
         self.last_stacked_output_path = None
         self.current_ref_path = None
@@ -127,14 +128,20 @@ class StackerTab(QWidget):
         proj_layout.addLayout(btn_proj_row)
         left_layout.addWidget(grp_project)
 
-        # SECCIÓN 2: Pestañas de Archivos (Lights / Darks)
+        # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Suelo)
         self.tabs_files = QTabWidget()
+        
         self.list_lights = QListWidget()
         self.list_lights.itemDoubleClicked.connect(self.on_light_double_clicked)
         self.tabs_files.addTab(self.list_lights, "Lights")
 
         self.list_darks = QListWidget()
         self.tabs_files.addTab(self.list_darks, "Darks")
+
+        self.list_ground = QListWidget()
+        self.list_ground.itemDoubleClicked.connect(self.on_ground_double_clicked)
+        self.tabs_files.addTab(self.list_ground, "Suelo")
+        
         left_layout.addWidget(self.tabs_files, stretch=1)
 
         btn_box = QHBoxLayout()
@@ -153,6 +160,18 @@ class StackerTab(QWidget):
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Trípode Fijo (Suelo Estático)", "Star Tracker (Seguimiento)"])
         set_layout.addWidget(self.combo_mode)
+
+        # --- NUEVO: Tratamiento del Suelo ---
+        set_layout.addWidget(QLabel("Tratamiento del Suelo:"))
+        self.combo_ground = QComboBox()
+        self.combo_ground.addItems([
+            "Apilar Suelo Completo (Dual)",
+            "Suelo de Referencia (Sin apilar)",
+            "Cargar Suelo cargado"
+        ])
+        #self.combo_ground.currentIndexChanged.connect(self._on_ground_mode_changed)
+        set_layout.addWidget(self.combo_ground)
+
 
         set_layout.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
         self.spin_kappa = QDoubleSpinBox()
@@ -297,30 +316,38 @@ class StackerTab(QWidget):
 
     # --- Reconstrucción de la lista visual con filas interactivas ---
     def _refresh_list_view(self, tab_name: str):
-        is_lights = (tab_name == "Lights")
-        widget_list = self.list_lights if is_lights else self.list_darks
-        files_data = self.lights_list if is_lights else self.darks_list
+        if tab_name == "Lights":
+            widget_list = self.list_lights
+            files_data = self.lights_list
+        elif tab_name == "Darks":
+            widget_list = self.list_darks
+            files_data = self.darks_list
+        else:
+            widget_list = self.list_ground
+            files_data = self.ground_list
 
         widget_list.clear()
         for idx, path in enumerate(files_data):
             item = QListWidgetItem(widget_list)
-            # El primer light es por defecto la referencia
-            is_ref = is_lights and (path == self.current_ref_path)
+            is_ref = (tab_name == "Lights") and (path == self.current_ref_path)
             row_widget = FileListRow(path, tab_name=tab_name, is_ref=is_ref)
             row_widget.delete_requested.connect(self.delete_single_file)
             item.setSizeHint(row_widget.sizeHint())
             widget_list.setItemWidget(item, row_widget)
 
     def delete_single_file(self, tab_name: str, filepath: str):
-        is_lights = (tab_name == "Lights")
-        file_list = self.lights_list if is_lights else self.darks_list
+        if tab_name == "Lights":
+            file_list = self.lights_list
+        elif tab_name == "Darks":
+            file_list = self.darks_list
+        else:
+            file_list = self.ground_list
 
         if filepath in file_list:
             file_list.remove(filepath)
             self.log_message(f"Eliminada toma de {tab_name}: {os.path.basename(filepath)}")
 
-            if is_lights:
-                # Si hemos borrado la que estaba como referencia, asignamos la nueva primera toma
+            if tab_name == "Lights":
                 if filepath == self.current_ref_path:
                     if self.lights_list:
                         self.load_frame_to_canvas(self.lights_list[0])
@@ -329,20 +356,24 @@ class StackerTab(QWidget):
                         self.canvas.base_pixmap = None
                         self.canvas.update()
                 self._refresh_list_view("Lights")
-            else:
+            elif tab_name == "Darks":
                 self._refresh_list_view("Darks")
+            else:
+                self._refresh_list_view("Suelo")
 
     def add_current_tab_files(self):
-        current_tab = self.tabs_files.currentIndex()
-        tab_name = "Lights" if current_tab == 0 else "Darks"
-        
+        idx = self.tabs_files.currentIndex()
+        tab_names = ["Lights", "Darks", "Suelo"]
+        tab_name = tab_names[idx]
+
         paths, _ = QFileDialog.getOpenFileNames(
             self, f"Seleccionar {tab_name}", "",
-            "Astro Images (*.nef *.cr2 *.cr3 *.arw *.dng *.tif *.tiff *.fits)"
+            "Astro Images (*.nef *.cr2 *.cr3 *.arw *.dng *.tif *.tiff *.fits *.jpg *.png)"
         )
-        if not paths: return
+        if not paths: 
+            return
 
-        if current_tab == 0:
+        if idx == 0:
             first_add = len(self.lights_list) == 0
             for p in paths:
                 if p not in self.lights_list:
@@ -351,25 +382,39 @@ class StackerTab(QWidget):
                 self.load_frame_to_canvas(self.lights_list[0])
             self._refresh_list_view("Lights")
             self.log_message(f"Añadidos {len(paths)} Lights. Total: {len(self.lights_list)}")
-        else:
+
+        elif idx == 1:
             for p in paths:
                 if p not in self.darks_list:
                     self.darks_list.append(p)
             self._refresh_list_view("Darks")
             self.log_message(f"Añadidos {len(paths)} Darks. Total: {len(self.darks_list)}")
 
+        else:
+            for p in paths:
+                if p not in self.ground_list:
+                    self.ground_list.append(p)
+            self._refresh_list_view("Suelo")
+            self.combo_ground.setCurrentIndex(2)  # Activa automáticamente el modo Suelo Externo
+            self.log_message(f"Añadida(s) {len(paths)} toma(s) de Suelo. Modo suelo actualizado a 'Usar Toma de Pestaña Suelo'.")
+
     def clear_current_tab_files(self):
-        if self.tabs_files.currentIndex() == 0:
+        idx = self.tabs_files.currentIndex()
+        if idx == 0:
             self.lights_list.clear()
             self.list_lights.clear()
             self.current_ref_path = None
             self.canvas.base_pixmap = None
             self.canvas.update()
             self.log_message("Lista de Lights vaciada.")
-        else:
+        elif idx == 1:
             self.darks_list.clear()
             self.list_darks.clear()
             self.log_message("Lista de Darks vaciada.")
+        else:
+            self.ground_list.clear()
+            self.list_ground.clear()
+            self.log_message("Lista de Suelo vaciada.")
 
     def on_light_double_clicked(self, item):
         row = self.list_lights.row(item)
@@ -494,7 +539,9 @@ class StackerTab(QWidget):
     def _do_save(self, filepath: str):
         self.project_mgr.data["light_frames"] = self.lights_list
         self.project_mgr.data["dark_frames"] = self.darks_list
+        self.project_mgr.data["ground_frames"] = self.ground_list  # <--- NUEVO
         self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
+        self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()  # <--- NUEVO
         self.project_mgr.data["parameters"] = {
             "kappa": self.spin_kappa.value(),
             "lp_method_idx": self.combo_lp_algo.currentIndex(),
@@ -520,6 +567,7 @@ class StackerTab(QWidget):
 
             self.lights_list.clear()
             self.darks_list.clear()
+            self.ground_list.clear()
 
             for fpath in data.get("light_frames", []):
                 if os.path.exists(fpath):
@@ -529,11 +577,16 @@ class StackerTab(QWidget):
                 if os.path.exists(fpath):
                     self.darks_list.append(fpath)
 
+            for fpath in data.get("ground_frames", []):  # <--- NUEVO
+                if os.path.exists(fpath):
+                    self.ground_list.append(fpath)
+
             mode = data.get("mode", "fixed_tripod")
             self.combo_mode.setCurrentIndex(0 if mode == "fixed_tripod" else 1)
+            self.combo_ground.setCurrentIndex(data.get("ground_mode_idx", 0))  # <--- NUEVO
+            
             params = data.get("parameters", {})
             self.spin_kappa.setValue(params.get("kappa", 2.2))
-
             self.combo_lp_algo.setCurrentIndex(params.get("lp_method_idx", 0))
             self.slider_stack_lp.setValue(params.get("lp_strength", 50))
 
@@ -542,6 +595,7 @@ class StackerTab(QWidget):
 
             self._refresh_list_view("Lights")
             self._refresh_list_view("Darks")
+            self._refresh_list_view("Suelo")
 
             if loaded_mask is not None:
                 self.computed_mask = loaded_mask
@@ -552,11 +606,45 @@ class StackerTab(QWidget):
             name = os.path.basename(p)
             self.lbl_session.setText(f"Sesión: {name}")
             self.session_title_changed.emit(name)
-            self.log_message(f"[PROYECTO] Cargada: {len(self.lights_list)} Lights, {len(self.darks_list)} Darks.")
+            self.log_message(
+                f"[PROYECTO] Cargada: {len(self.lights_list)} Lights, "
+                f"{len(self.darks_list)} Darks, {len(self.ground_list)} Suelo."
+            )
 
         except Exception as e:
             self.log_message(f"[ERROR] Al abrir sesión: {e}")
             QMessageBox.critical(self, "Error al abrir sesión", str(e))
+
+    def reset_session(self):
+        self.lights_list.clear()
+        self.darks_list.clear()
+        self.ground_list.clear()  # <--- Limpieza
+        self.list_lights.clear()
+        self.list_darks.clear()
+        self.list_ground.clear()  # <--- Limpieza
+        self.current_ref_path = None
+        self.last_stacked_output_path = None
+
+        self.project_mgr = ProjectManager()
+        self.lbl_session.setText("Sesión: Sin guardar")
+        self.session_title_changed.emit("")
+
+        self.clear_mask()
+        self.canvas.orig_rgb = None
+        self.canvas.base_pixmap = None
+        self.canvas.update()
+
+        self.combo_mode.setCurrentIndex(0)
+        self.combo_ground.setCurrentIndex(0)  # <--- Reset
+        self.spin_kappa.setValue(2.2)
+        self.combo_lp_algo.setCurrentIndex(0)
+        self.slider_stack_lp.setValue(50)
+        self.spin_feather.setValue(7)
+        self.spin_iter.setValue(3)
+
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.txt_log.clear()
 
     def start_stacking(self):
         if len(self.lights_list) < 2:
@@ -596,11 +684,29 @@ class StackerTab(QWidget):
         except Exception:
             saved_storage = "auto"
             
+        # Mapeo de modo de suelo
+        # 0: "dual", 1: "reference", 2: "external"
+        ground_modes = ["dual", "reference", "external"]
+        selected_ground_mode = ground_modes[self.combo_ground.currentIndex()]
+
+        external_path = None
+        if selected_ground_mode == "external":
+            if not self.ground_list:
+                QMessageBox.warning(
+                    self, "Aviso", 
+                    "Has seleccionado 'Usar Toma de Pestaña Suelo' pero la pestaña Suelo está vacía.\n"
+                    "Añade una toma en la pestaña Suelo o cambia el modo de suelo."
+                )
+                return
+            external_path = self.ground_list[0]
+
         cfg = {
             "lights": self.lights_list,
             "darks": self.darks_list,
             "mask": self.computed_mask,
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
+            "ground_mode": selected_ground_mode,
+            "external_ground_path": external_path,
             "kappa": self.spin_kappa.value(),
             "output_path": out_path,
             "lp_method": selected_lp_method,
@@ -701,40 +807,6 @@ class StackerTab(QWidget):
         self.reset_session()
         self.new_session_requested.emit()
         self.log_message("[SESIÓN] Nueva sesión iniciada. Entorno restablecido.")
-
-    def reset_session(self):
-        """Limpia todo el estado interno y la interfaz del apilador."""
-        # 1. Listas y referencias
-        self.lights_list.clear()
-        self.darks_list.clear()
-        self.list_lights.clear()
-        self.list_darks.clear()
-        self.current_ref_path = None
-        self.last_stacked_output_path = None
-
-        # 2. Proyecto
-        self.project_mgr = ProjectManager()
-        self.lbl_session.setText("Sesión: Sin guardar")
-        self.session_title_changed.emit("")
-
-        # 3. Máscara y Canvas
-        self.clear_mask()
-        self.canvas.orig_rgb = None
-        self.canvas.base_pixmap = None
-        self.canvas.update()
-
-        # 4. Parámetros de apilado a valores por defecto
-        self.combo_mode.setCurrentIndex(0)
-        self.spin_kappa.setValue(2.2)
-        self.combo_lp_algo.setCurrentIndex(0)
-        self.slider_stack_lp.setValue(50)
-        self.spin_feather.setValue(7)
-        self.spin_iter.setValue(3)
-
-        # 5. Barra de progreso y logs
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("%p%")
-        self.txt_log.clear()
         
     def _set_ui_busy(self, busy: bool):
         """Bloquea o desbloquea controles secundarios durante el procesamiento."""
@@ -771,3 +843,10 @@ class StackerTab(QWidget):
             "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
         )
         self._set_ui_busy(False)
+        
+    def on_ground_double_clicked(self, item):
+        row = self.list_ground.row(item)
+        if 0 <= row < len(self.ground_list):
+            path = self.ground_list[row]
+            self.load_frame_to_canvas(path)
+            self.log_message(f"[SUELO] Vista previa de suelo: {os.path.basename(path)}")

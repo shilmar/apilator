@@ -4,6 +4,23 @@
 
 ---
 
+## Release v0.5.5 - Flujos Flexibles de Suelo y Auditoría del Motor
+
+### Novedades y Mejoras Clave:
+**Gestión Flexible del Suelo en el Apilado:**
+  * Nueva pestaña dedicada **"Suelo"** integrada de forma unificada junto a *Lights* y *Darks*.
+  * Selector de tratamiento de suelo:
+    * *Apilar Suelo Completo (Dual)*: Integración estándar de cielo y tierra.
+    * *Suelo de Referencia (Sin apilar)*: Usa la toma de referencia para la zona terrestre, evitando emborronamiento en noches ventosas y acelerando el cálculo.
+    * *Usar Toma de Pestaña Suelo*: Permite asignar tomas dedicadas de suelo (hora azul, baja sensibilidad ISO o exposiciones prolongadas).
+**Persistencia Ampliada en Sesiones (.mwstack):**
+  * Soporte para guardar y restaurar rutas relativas de tomas de suelo, máscaras de 16 bits y configuración de integración.
+**Auditoría de Rendimiento y Código:**
+  * **Lienzo y Curvas (`MaskCanvas` y `CurveWidget`):** Submuestreo rápido para el cálculo instantáneo de percentiles e histogramas logarítmicos sin congelar la interfaz; protección estricta contra cruces de nodos en PCHIP y soporte completo para eventos nativos de Qt6.
+  * **Ajustes y GPU (`SettingsTab` y `gpu_backend`):** Eliminación de lecturas duplicadas de configuración y optimización del módulo matemático condicional.
+  * **Puentes CLI (`StarNet` y `GraXpert`):** Operaciones vectoriales continuas y saneamiento de llamadas de subprocesos.
+---
+
 ## Características Principales
 
 ### 1. Apilado Diferencial Cielo / Suelo

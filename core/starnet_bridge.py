@@ -1,4 +1,8 @@
 # core/starnet_bridge.py
+"""
+core/starnet_bridge.py - Puente de invocación para StarNetv2 CLI en modo lineal.
+"""
+from typing import Callable, Optional, Tuple
 import os
 import shutil
 import subprocess
@@ -10,7 +14,14 @@ import tifffile
 from core.config_manager import get_config_val
 
 
-def find_starnet_executable(custom_path: str = None) -> str:
+def find_starnet_executable(custom_path: Optional[str] = None) -> Optional[str]:
+    """
+    Localiza el ejecutable de StarNet (starnet2.exe o starnet++.exe) por orden de prioridad:
+    1. Ruta personalizada pasada por parámetro.
+    2. Ruta guardada en la configuración global.
+    3. Carpetas locales del proyecto o directorio raíz.
+    4. PATH del sistema operativo.
+    """
     if custom_path and os.path.isfile(custom_path):
         return os.path.abspath(custom_path)
 
@@ -24,8 +35,7 @@ def find_starnet_executable(custom_path: str = None) -> str:
         os.path.join(root, "starnet2", "starnet2.exe"),
         os.path.join(root, "starnet", "starnet++.exe"),
         os.path.join(root, "starnet++.exe"),
-        "starnet2.exe",
-        "starnet++.exe"
+        os.path.join(root, "starnet2.exe"),
     ]
 
     for c in candidates:
@@ -41,24 +51,27 @@ def find_starnet_executable(custom_path: str = None) -> str:
 
 def run_starnet(
     img_rgb: np.ndarray,
-    sky_mask: np.ndarray = None,
+    sky_mask: Optional[np.ndarray] = None,
     stride: int = 256,
-    starnet_exe: str = None,
-    log_callback=None
-) -> tuple[np.ndarray, np.ndarray]:
+    starnet_exe: Optional[str] = None,
+    log_callback: Optional[Callable[[str], None]] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Ejecuta StarNetv2 en modo LINEAL sobre img_rgb (float32 [0.0, 1.0]).
-    Protege el suelo si existe sky_mask.
-    Retorna (starless_rgb, stars_rgb) en el mismo espacio lineal exacto.
+    
+    Protege el suelo neutralizándolo si existe sky_mask.
+    Retorna:
+        starless_rgb (np.ndarray): Imagen sin estrellas con el suelo intacto.
+        stars_rgb (np.ndarray): Capa aislada de estrellas en espacio lineal.
     """
     exe = find_starnet_executable(starnet_exe)
     if not exe or not os.path.isfile(exe):
         raise FileNotFoundError(
             "No se encontró el ejecutable de StarNet++ ('starnet2.exe' o 'starnet++.exe').\n"
-            "Configura la ruta en la pestaña '3. Configuración / Ajustes'."
+            "Configura la ruta en la pestaña 'Ajustes'."
         )
 
-    def log(msg):
+    def log(msg: str):
         if log_callback:
             log_callback(msg)
 
@@ -79,12 +92,9 @@ def run_starnet(
                 mask_aligned = sky_mask
 
             sky_pixels = input_data[mask_aligned > 0.5]
-            if len(sky_pixels) > 0:
-                bg_color = np.median(sky_pixels, axis=0)
-            else:
-                bg_color = np.array([0.005, 0.005, 0.005], dtype=np.float32)
+            bg_color = np.median(sky_pixels, axis=0) if len(sky_pixels) > 0 else np.array([0.005, 0.005, 0.005], dtype=np.float32)
 
-            mask_3d = np.repeat(mask_aligned[..., np.newaxis], 3, axis=2)
+            mask_3d = mask_aligned[..., np.newaxis]
             input_data = (input_data * mask_3d) + (bg_color * (1.0 - mask_3d))
 
         in_tif = os.path.join(temp_dir, "starnet_in.tif")
@@ -94,7 +104,6 @@ def run_starnet(
         u16_input = (np.clip(input_data, 0.0, 1.0) * 65535.0).astype(np.uint16)
         tifffile.imwrite(in_tif, u16_input, photometric='rgb')
 
-        # Incluimos explícitamente el flag --linear para que StarNet entienda el rango lineal astronómico
         cmd = [
             exe,
             "-i", in_tif,
@@ -113,10 +122,11 @@ def run_starnet(
             shell=False
         )
 
-        for line in proc.stdout:
-            txt = line.strip()
-            if txt:
-                log(f"[StarNet] {txt}")
+        if proc.stdout:
+            for line in proc.stdout:
+                txt = line.strip()
+                if txt:
+                    log(f"[StarNet] {txt}")
 
         proc.wait()
         if proc.returncode != 0:
@@ -138,8 +148,7 @@ def run_starnet(
 
         starless_final = np.clip(starless_final, 0.0, 1.0).astype(np.float32)
 
-        # 3. Capa Estrellas = max(0.0, Original - Starless) en el mismo espacio lineal
-        # Se asegura que donde Starless supere al original por ruido, no baje de cero
+        # 3. Capa Estrellas = max(0.0, Original - Starless)
         stars_only = np.clip(img_rgb - starless_final, 0.0, 1.0).astype(np.float32)
 
         log("Desacoplo de estrellas completado limpiamente.")
