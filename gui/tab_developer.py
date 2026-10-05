@@ -43,6 +43,7 @@ from core.stretch import (
 from gui.widgets.curve_widget import CurveWidget
 from gui.canvas import MaskCanvas
 from gui.worker import GraXpertWorker, StarNetWorker
+from core.config_manager import load_config
 
 
 class DeveloperTab(QWidget):
@@ -676,8 +677,11 @@ class DeveloperTab(QWidget):
             "Archivos TIFF (*.tif *.tiff);;"
             "Archivos FITS (*.fits *.fit)"
         )
+        cfg = load_config()
+        default_dir = cfg.get("stacked_dir", os.getcwd())
+
         p, _ = QFileDialog.getOpenFileName(
-            self, "Abrir Imagen de Astronomía o RAW", "",
+            self, "Abrir Imagen de Astronomía o RAW", default_dir,
             filtros
         )
         if p:
@@ -1256,9 +1260,19 @@ class DeveloperTab(QWidget):
             "TIFF 32-bit Float (*.tif *.tiff);;"
             "JPEG (*.jpg *.jpeg)"
         )
+        filtro_por_defecto = "TIFF 16-bit (*.tif *.tiff)"
+        
+        cfg = load_config()
+        default_dir = cfg.get("export_dir", os.getcwd())
+        os.makedirs(default_dir, exist_ok=True)
+        default_path = os.path.join(default_dir, "revelado_final.tif")
 
         p, selected_filter = QFileDialog.getSaveFileName(
-            self, "Exportar Revelado", "revelado_final.tif", filtros
+            self, 
+            "Exportar Revelado", 
+            default_path, 
+            filtros, 
+            selectedFilter=filtro_por_defecto
         )
         if not p:
             return
@@ -1278,7 +1292,6 @@ class DeveloperTab(QWidget):
         h_full, w_full = self.image_32bit.shape[:2]
         self.log_message(f"Exportando imagen completa ({w_full}x{h_full} px)...")
 
-        #full_base = self._compose_active_base(for_export=True)
         full_base, _ = self._compose_active_base(for_export=True)
 
         full_mask = None

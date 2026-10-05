@@ -16,3 +16,15 @@ __pycache__/
 .vscode/
 venv/
 env/
+sesiones/*
+!sesiones/.gitkeep
+!sesiones/mascaras/
+
+sesiones/mascaras/*
+!sesiones/mascaras/.gitkeep
+
+imagenes/*
+!imagenes/.gitkeep
+
+exportaciones/*
+!exportaciones/.gitkeep

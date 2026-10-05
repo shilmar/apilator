@@ -1,10 +1,17 @@
 {
+    "sessions_dir": "C:\\Temp\\apilator\\sesiones",
+    "masks_dir": "C:\\Temp\\apilator\\sesiones\\mascaras",
+    "stacked_dir": "C:\\Temp\\apilator\\imagenes",
+    "export_dir": "C:\\Temp\\apilator\\exportaciones",
+    "kappa": 2.2,
+    "storage_strategy": "disk",
+    "use_gpu": false,
+    "cpu_workers": 2,
+    "lp_method": "standard",
+    "lp_strength": 0.5,
     "starnet_exe": "C:/Program Files/StarNet2/bin/starnet2.exe",
     "graxpert_smoothing": 0.5,
     "default_kappa": 2.2,
     "preview_max_dim": 1500,
-    "export_format_default": "TIFF 16-bit (*.tif *.tiff)",
-    "use_gpu": true,
-    "cpu_workers": 4,
-    "storage_strategy": "ram"
+    "export_format_default": "TIFF 16-bit (*.tif *.tiff)"
 }

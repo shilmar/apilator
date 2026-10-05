@@ -502,20 +502,32 @@ class StackerTab(QWidget):
         self.log_message("Máscara y trazos eliminados por completo.")
 
     def save_mask(self):
-        if self.computed_mask is None: return
-        p, _ = QFileDialog.getSaveFileName(self, "Exportar Máscara PNG", "mascara_cielo.png", "PNG (*.png)")
+        if self.computed_mask is None:
+            return
+        cfg = load_config()
+        default_dir = cfg.get("masks_dir", os.getcwd())
+        default_path = os.path.join(default_dir, "mascara_cielo.png")
+        
+        p, _ = QFileDialog.getSaveFileName(self, "Exportar Máscara PNG", default_path, "PNG (*.png)")
         if p:
             cv2.imwrite(p, (self.computed_mask * 65535.0).astype(np.uint16))
             self.log_message(f"Máscara exportada en: {os.path.basename(p)}")
 
     def load_mask(self):
-        if self.canvas.orig_rgb is None: return
-        p, _ = QFileDialog.getOpenFileName(self, "Cargar Máscara PNG", "", "Imágenes (*.png *.tif *.tiff)")
-        if not p: return
+        if self.canvas.orig_rgb is None:
+            return
+        cfg = load_config()
+        default_dir = cfg.get("masks_dir", os.getcwd())
+        
+        p, _ = QFileDialog.getOpenFileName(self, "Cargar Máscara PNG", default_dir, "Imágenes (*.png *.tif *.tiff)")
+        if not p:
+            return
         raw = cv2.imread(p, cv2.IMREAD_UNCHANGED)
-        if raw.ndim == 3: raw = raw[..., 0]
+        if raw.ndim == 3:
+            raw = raw[..., 0]
         h, w = self.canvas.orig_rgb.shape[:2]
-        if raw.shape != (h, w): raw = cv2.resize(raw, (w, h))
+        if raw.shape != (h, w):
+            raw = cv2.resize(raw, (w, h))
         max_v = 65535.0 if raw.dtype == np.uint16 else 255.0
         self.computed_mask = np.clip(raw.astype(np.float32) / max_v, 0.0, 1.0)
         self.canvas.set_refined_mask(self.computed_mask)
@@ -529,38 +541,28 @@ class StackerTab(QWidget):
             self.save_project_as()
 
     def save_project_as(self):
+        cfg = load_config()
+        default_dir = cfg.get("sessions_dir", os.getcwd())
+        default_file = os.path.join(default_dir, "mi_sesion.mwstack")
+
         p, _ = QFileDialog.getSaveFileName(
-            self, "Guardar Sesión de Apilado", "mi_sesion.mwstack",
+            self, "Guardar Sesión de Apilado", default_file,
             "Astro Session (*.mwstack *.json)"
         )
-        if not p: return
+        if not p:
+            return
         self._do_save(p)
 
-    def _do_save(self, filepath: str):
-        self.project_mgr.data["light_frames"] = self.lights_list
-        self.project_mgr.data["dark_frames"] = self.darks_list
-        self.project_mgr.data["ground_frames"] = self.ground_list  # <--- NUEVO
-        self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
-        self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()  # <--- NUEVO
-        self.project_mgr.data["parameters"] = {
-            "kappa": self.spin_kappa.value(),
-            "lp_method_idx": self.combo_lp_algo.currentIndex(),
-            "lp_strength": self.slider_stack_lp.value()
-        }
-
-        self.project_mgr.save(filepath, mask_array=self.computed_mask)
-        name = os.path.basename(filepath)
-        self.lbl_session.setText(f"Sesión: {name}")
-        self.session_title_changed.emit(name)
-        self.log_message(f"[PROYECTO] Sesión guardada en: {name}")
-        QMessageBox.information(self, "Sesión Guardada", f"Guardada en:\n{filepath}")
-
     def open_project(self):
+        cfg = load_config()
+        default_dir = cfg.get("sessions_dir", os.getcwd())
+
         p, _ = QFileDialog.getOpenFileName(
-            self, "Cargar Sesión de Apilado", "",
+            self, "Cargar Sesión de Apilado", default_dir,
             "Astro Session (*.mwstack *.json)"
         )
-        if not p: return
+        if not p:
+            return
 
         try:
             data, loaded_mask = self.project_mgr.load(p)
@@ -577,13 +579,13 @@ class StackerTab(QWidget):
                 if os.path.exists(fpath):
                     self.darks_list.append(fpath)
 
-            for fpath in data.get("ground_frames", []):  # <--- NUEVO
+            for fpath in data.get("ground_frames", []):
                 if os.path.exists(fpath):
                     self.ground_list.append(fpath)
 
             mode = data.get("mode", "fixed_tripod")
             self.combo_mode.setCurrentIndex(0 if mode == "fixed_tripod" else 1)
-            self.combo_ground.setCurrentIndex(data.get("ground_mode_idx", 0))  # <--- NUEVO
+            self.combo_ground.setCurrentIndex(data.get("ground_mode_idx", 0))
             
             params = data.get("parameters", {})
             self.spin_kappa.setValue(params.get("kappa", 2.2))
@@ -614,6 +616,25 @@ class StackerTab(QWidget):
         except Exception as e:
             self.log_message(f"[ERROR] Al abrir sesión: {e}")
             QMessageBox.critical(self, "Error al abrir sesión", str(e))
+
+    def _do_save(self, filepath: str):
+        self.project_mgr.data["light_frames"] = self.lights_list
+        self.project_mgr.data["dark_frames"] = self.darks_list
+        self.project_mgr.data["ground_frames"] = self.ground_list  # <--- NUEVO
+        self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
+        self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()  # <--- NUEVO
+        self.project_mgr.data["parameters"] = {
+            "kappa": self.spin_kappa.value(),
+            "lp_method_idx": self.combo_lp_algo.currentIndex(),
+            "lp_strength": self.slider_stack_lp.value()
+        }
+
+        self.project_mgr.save(filepath, mask_array=self.computed_mask)
+        name = os.path.basename(filepath)
+        self.lbl_session.setText(f"Sesión: {name}")
+        self.session_title_changed.emit(name)
+        self.log_message(f"[PROYECTO] Sesión guardada en: {name}")
+        QMessageBox.information(self, "Sesión Guardada", f"Guardada en:\n{filepath}")
 
     def reset_session(self):
         self.lights_list.clear()
@@ -651,8 +672,12 @@ class StackerTab(QWidget):
             QMessageBox.warning(self, "Aviso", "Añade al menos 2 tomas de luz (Lights) para apilar.")
             return
 
+        app_cfg = load_config()
+        default_stacked_dir = app_cfg.get("stacked_dir", os.getcwd())
+        default_file = os.path.join(default_stacked_dir, "resultado_dual_32bit.tiff")
+
         out_path, _ = QFileDialog.getSaveFileName(
-            self, "Guardar Resultado 32-bit", "resultado_dual_32bit.tiff", "TIFF (*.tiff *.tif)"
+            self, "Guardar Resultado 32-bit", default_file, "TIFF (*.tiff *.tif)"
         )
         if not out_path: 
             return

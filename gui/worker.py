@@ -16,6 +16,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from PySide6.QtCore import QThread, Signal
 
+from core.config_manager import load_config
+
 from core.stacking import (
     load_image_as_float32, 
     detect_sky_stars, 
@@ -28,7 +30,6 @@ from core.stacking import (
     align_single_light_task,
     save_frame_float32
 )
-
 from core.graxpert_bridge import run_graxpert_background_extraction
 from core.starnet_bridge import run_starnet
 
@@ -106,7 +107,20 @@ class StackingWorker(QThread):
             ground_mode = self.config.get("ground_mode", "dual")
             external_ground_path = self.config.get("external_ground_path", None)
             kappa = float(self.config.get("kappa", 2.2))
-            output_path = self.config.get("output_path", "resultado_dual_32bit.tiff")
+
+            # Resolución inteligente de la ruta de salida en 'stacked_dir'
+            app_cfg = load_config()
+            default_stacked_dir = app_cfg.get("stacked_dir", os.getcwd())
+            raw_output = self.config.get("output_path", "resultado_dual_32bit.tiff")
+
+            # Si es solo un nombre de archivo o ruta relativa, redirigir a la carpeta configurada
+            if not os.path.isabs(raw_output):
+                output_path = os.path.normpath(os.path.join(default_stacked_dir, raw_output))
+            else:
+                output_path = os.path.normpath(raw_output)
+
+            # Asegurar que el directorio de salida existe físicamente
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             lp_method = self.config.get("lp_method", "standard")
             lp_strength = float(self.config.get("lp_strength", 0.5))

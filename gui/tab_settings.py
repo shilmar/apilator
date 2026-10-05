@@ -1,6 +1,6 @@
 # gui/tab_settings.py
 """
-gui/tab_settings.py - Pestaña de configuración de hardware, rutas externas y parámetros generales.
+gui/tab_settings.py - Pestaña de configuración de hardware, rutas de trabajo, rutas externas y parámetros generales.
 """
 import os
 from typing import Optional
@@ -29,7 +29,49 @@ class SettingsTab(QWidget):
         main_layout.setSpacing(15)
 
         # -------------------------------------------------------------
-        # 1. Grupo: Rutas de Herramientas Externas
+        # 1. Grupo: Directorios de Trabajo por Defecto
+        # -------------------------------------------------------------
+        grp_dirs = QGroupBox("Directorios de Trabajo del Proyecto")
+        dirs_layout = QVBoxLayout(grp_dirs)
+        dirs_layout.setSpacing(10)
+
+        # Sesiones
+        dirs_layout.addWidget(QLabel("Carpeta de Sesiones (.mwstack y máscaras asociadas):"))
+        row_sess = QHBoxLayout()
+        self.txt_sessions = QLineEdit(self.cfg.get("sessions_dir", ""))
+        self.txt_sessions.setReadOnly(True)
+        row_sess.addWidget(self.txt_sessions)
+        btn_browse_sess = QPushButton("Examinar...")
+        btn_browse_sess.clicked.connect(lambda: self._browse_directory(self.txt_sessions, "Seleccionar Carpeta de Sesiones"))
+        row_sess.addWidget(btn_browse_sess)
+        dirs_layout.addLayout(row_sess)
+
+        # Imágenes apiladas
+        dirs_layout.addWidget(QLabel("Carpeta de Salida de Apilados (TIFF lineales 32-bit):"))
+        row_stack = QHBoxLayout()
+        self.txt_stacked = QLineEdit(self.cfg.get("stacked_dir", ""))
+        self.txt_stacked.setReadOnly(True)
+        row_stack.addWidget(self.txt_stacked)
+        btn_browse_stack = QPushButton("Examinar...")
+        btn_browse_stack.clicked.connect(lambda: self._browse_directory(self.txt_stacked, "Seleccionar Carpeta de Imágenes Apiladas"))
+        row_stack.addWidget(btn_browse_stack)
+        dirs_layout.addLayout(row_stack)
+
+        # Exportaciones finales
+        dirs_layout.addWidget(QLabel("Carpeta de Exportación de Revelados (TIFF 16-bit, PNG, JPG):"))
+        row_exp = QHBoxLayout()
+        self.txt_export = QLineEdit(self.cfg.get("export_dir", ""))
+        self.txt_export.setReadOnly(True)
+        row_exp.addWidget(self.txt_export)
+        btn_browse_exp = QPushButton("Examinar...")
+        btn_browse_exp.clicked.connect(lambda: self._browse_directory(self.txt_export, "Seleccionar Carpeta de Exportaciones"))
+        row_exp.addWidget(btn_browse_exp)
+        dirs_layout.addLayout(row_exp)
+
+        main_layout.addWidget(grp_dirs)
+
+        # -------------------------------------------------------------
+        # 2. Grupo: Rutas de Herramientas Externas
         # -------------------------------------------------------------
         grp_paths = QGroupBox("Rutas de Herramientas Externas")
         paths_layout = QVBoxLayout(grp_paths)
@@ -49,7 +91,7 @@ class SettingsTab(QWidget):
         main_layout.addWidget(grp_paths)
 
         # -------------------------------------------------------------
-        # 2. Grupo: Parámetros Generales
+        # 3. Grupo: Parámetros Generales
         # -------------------------------------------------------------
         grp_defaults = QGroupBox("Parámetros Generales")
         def_layout = QVBoxLayout(grp_defaults)
@@ -80,7 +122,7 @@ class SettingsTab(QWidget):
         main_layout.addWidget(grp_defaults)
 
         # -------------------------------------------------------------
-        # 3. Grupo: Rendimiento y Aceleración por Hardware
+        # 4. Grupo: Rendimiento y Aceleración por Hardware
         # -------------------------------------------------------------
         grp_perf = QGroupBox("Rendimiento y Aceleración por Hardware")
         layout_perf = QVBoxLayout(grp_perf)
@@ -140,7 +182,7 @@ class SettingsTab(QWidget):
         main_layout.addWidget(grp_perf)
 
         # -------------------------------------------------------------
-        # 4. Botón Guardar
+        # 5. Botón Guardar
         # -------------------------------------------------------------
         btn_save = QPushButton("Guardar Cambios de Configuración")
         btn_save.setFixedHeight(40)
@@ -149,6 +191,14 @@ class SettingsTab(QWidget):
         main_layout.addWidget(btn_save)
 
         main_layout.addStretch()
+
+    def _browse_directory(self, target_line_edit: QLineEdit, dialog_title: str) -> None:
+        """Abre un diálogo nativo para seleccionar una carpeta física."""
+        current_val = target_line_edit.text().strip()
+        start_dir = current_val if (current_val and os.path.exists(current_val)) else os.getcwd()
+        chosen = QFileDialog.getExistingDirectory(self, dialog_title, start_dir)
+        if chosen:
+            target_line_edit.setText(os.path.normpath(chosen))
 
     def _browse_starnet(self) -> None:
         """Abre el explorador de archivos para localizar el ejecutable de StarNet."""
@@ -160,10 +210,16 @@ class SettingsTab(QWidget):
             start_dir, "Ejecutables (*.exe);;Todos (*.*)"
         )
         if f:
-            self.txt_starnet.setText(f)
+            self.txt_starnet.setText(os.path.normpath(f))
 
     def save_settings(self) -> None:
         """Persiste las opciones seleccionadas en el archivo config.json."""
+        self.cfg["sessions_dir"] = self.txt_sessions.text().strip()
+        self.cfg["stacked_dir"] = self.txt_stacked.text().strip()
+        self.cfg["export_dir"] = self.txt_export.text().strip()
+        # Aseguramos también la subcarpeta de máscaras dentro de sesiones
+        self.cfg["masks_dir"] = os.path.join(self.cfg["sessions_dir"], "mascaras")
+
         self.cfg["starnet_exe"] = self.txt_starnet.text().strip()
         self.cfg["default_kappa"] = self.spin_kappa.value()
         self.cfg["preview_max_dim"] = self.spin_proxy.value()
