@@ -6,7 +6,7 @@ import numpy as np
 import rawpy
 import tifffile
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from astropy.io import fits
 from core.gpu_backend import is_gpu_enabled
 
@@ -60,10 +60,6 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
 
 
 def create_master_dark(dark_paths: list) -> np.ndarray:
-    """
-    Genera el Master Dark calculando la mediana de los cuadros de calibración.
-    Carga cada cuadro RAW a memoria una sola vez para eliminar lecturas redundantes.
-    """
     if not dark_paths:
         return None
 
@@ -93,10 +89,6 @@ def calibrate_light(light_img: np.ndarray, master_dark: np.ndarray = None) -> np
 
 
 def estimate_frame_background_dome(img_rgb: np.ndarray, sky_mask: np.ndarray = None) -> np.ndarray:
-    """
-    Estima el fondo estático de baja frecuencia (cúpula de luz fija al sensor).
-    Similar a la extracción analítica local por subexposición de Sequator.
-    """
     h, w, c = img_rgb.shape
     scale = max(1, min(h, w) // 120)
     sh, sw = max(16, h // scale), max(16, w // scale)
@@ -130,16 +122,11 @@ def preprocess_subframe_lp(
     sky_mask: np.ndarray = None,
     ref_stats: dict = None
 ) -> np.ndarray:
-    """
-    Preprocesa cada cuadro individual antes o después de la alineación.
-    method: 'standard', 'sequator_subtraction', 'min_rejection', 'local_norm'
-    """
     if strength <= 1e-4 or method in ["standard", "min_rejection"]:
         return frame_rgb
 
     h, w, c = frame_rgb.shape
 
-    # Modo Sequator: Sustracción del domo de fondo por cuadro
     if method == "sequator_subtraction":
         bg_dome = estimate_frame_background_dome(frame_rgb, sky_mask=sky_mask)
         pedestal = np.percentile(frame_rgb, 5, axis=(0, 1))
@@ -150,7 +137,6 @@ def preprocess_subframe_lp(
             return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
         return np.clip(corrected, 0.0, 1.0).astype(np.float32)
 
-    # Modo Normalización Fotométrica Local
     elif method == "local_norm" and ref_stats is not None:
         curr_median = np.median(frame_rgb, axis=(0, 1))
         target_median = ref_stats.get('median', curr_median)
@@ -204,50 +190,6 @@ def refine_star_centroids(gray_img: np.ndarray, keypoints: list) -> np.ndarray:
     return refined_pts
 
 
-def register_consecutive_homography(prev_kp, prev_desc, prev_gray, curr_img, sky_mask=None, norm_type=cv2.NORM_HAMMING):
-    curr_kp, curr_desc, _ = detect_sky_stars(curr_img, sky_mask=sky_mask)
-    if curr_desc is None or len(curr_kp) < 15:
-        raise RuntimeError(f"Solo se detectaron {len(curr_kp) if curr_kp else 0} estrellas en la toma.")
-
-    bf = cv2.BFMatcher(norm_type, crossCheck=False)
-    matches = bf.knnMatch(prev_desc, curr_desc, k=2)
-
-    good = []
-    for match_pair in matches:
-        if len(match_pair) == 2:
-            m, n = match_pair
-            if m.distance < 0.80 * n.distance:
-                good.append(m)
-
-    if len(good) < 12:
-        raise RuntimeError(f"Correspondencias insuficientes entre tomas ({len(good)} pares encontrados).")
-
-    curr_gray = cv2.cvtColor((curr_img * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-
-    prev_matched_kps = [prev_kp[m.queryIdx] for m in good]
-    curr_matched_kps = [curr_kp[m.trainIdx] for m in good]
-
-    dst_pts = refine_star_centroids(prev_gray, prev_matched_kps)
-    src_pts = refine_star_centroids(curr_gray, curr_matched_kps)
-
-    H_matrix, inliers = cv2.findHomography(
-        src_pts, dst_pts,
-        method=cv2.RANSAC,
-        ransacReprojThreshold=2.5,
-        maxIters=4000,
-        confidence=0.99
-    )
-
-    if H_matrix is None:
-        H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
-        if H_aff is None:
-            raise RuntimeError("Fallo en la estimación de homografía/afín con RANSAC.")
-        H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
-
-    num_inliers = int(np.sum(inliers)) if inliers is not None else 0
-    return H_matrix, num_inliers, curr_kp, curr_desc, curr_gray
-
-
 def save_frame_float32(filepath: str, img_float32: np.ndarray):
     raw_data = np.ascontiguousarray(img_float32, dtype=np.float32)
     with open(filepath, "wb") as f:
@@ -256,10 +198,6 @@ def save_frame_float32(filepath: str, img_float32: np.ndarray):
 
 
 def align_single_light_task(args: tuple) -> dict:
-    """
-    Tarea aislada para ProcessPoolExecutor: procesa y alinea un cuadro de luz contra la referencia.
-    Soporta almacenamiento en disco (.bin) o retorno directo en memoria RAM.
-    """
     (
         idx, path, total_lights, temp_dir, mode, master_dark,
         ref_kps_pts, ref_desc, norm_type, ref_gray,
@@ -273,8 +211,8 @@ def align_single_light_task(args: tuple) -> dict:
         "filename": filename,
         "success": False,
         "error": None,
-        "sky_data": None,   # Ruta .bin si es disco, np.ndarray si es RAM
-        "gnd_data": None,   # Ruta .bin si es disco, np.ndarray si es RAM
+        "sky_data": None,
+        "gnd_data": None,
         "inliers": 0,
         "dx": 0.0,
         "dy": 0.0
@@ -321,31 +259,22 @@ def align_single_light_task(args: tuple) -> dict:
         num_inliers = int(np.sum(inliers)) if inliers is not None else 0
         del dst_pts, src_pts, inliers
 
-        # Si disponemos de máscara, anulamos el suelo de la toma antes de rotar
-        # para que ramas y árboles rotados no ensucien el cielo estelar
         if sky_mask is not None:
-            # Aseguramos que la máscara esté en float32 y tamaño correcto
             sm = sky_mask if sky_mask.shape[:2] == (h, w) else cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-            if sm.ndim == 2:
-                sm_3d = sm[..., np.newaxis]
-            else:
-                sm_3d = sm
-
-            # Reemplazamos el suelo por el pedestal medio del cielo para que no genere bordes negros artificiales
+            sm_3d = sm[..., np.newaxis] if sm.ndim == 2 else sm
             sky_median_val = np.median(calibrated_frame[sm > 0.5]) if np.any(sm > 0.5) else 0.05
             clean_sky_frame = (calibrated_frame * sm_3d) + (sky_median_val * (1.0 - sm_3d))
         else:
             clean_sky_frame = calibrated_frame
 
-        # Rellenar con NaN fuera de los límites de la toma para no sesgar el apilado periférico
+        # Regreso exacto al borderValue=(0, 0, 0) de la 0.5.5 (Cero NaNs)
+        # Relleno por reflexión en bordes para evitar franjas negras y conservar dimensiones completas
         warped = cv2.warpPerspective(
             clean_sky_frame, H_matrix, (w, h),
             flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(np.nan, np.nan, np.nan)
+            borderMode=cv2.BORDER_REFLECT
         )
-        del clean_sky_frame
-        del calibrated_frame
+        del clean_sky_frame, calibrated_frame
 
         warped_processed = preprocess_subframe_lp(
             warped,
@@ -356,19 +285,14 @@ def align_single_light_task(args: tuple) -> dict:
         )
         del warped
 
-        if use_ram_buffer:
-            res["sky_data"] = np.ascontiguousarray(warped_processed, dtype=np.float32)
-            if mode == "fixed_tripod":
-                res["gnd_data"] = np.ascontiguousarray(raw_frame, dtype=np.float32)
-        else:
-            p_sky = os.path.join(temp_dir, f"sky_{idx-1:04d}.bin")
-            save_frame_float32(p_sky, warped_processed)
-            res["sky_data"] = p_sky
+        p_sky = os.path.join(temp_dir, f"sky_{idx-1:04d}.bin")
+        save_frame_float32(p_sky, warped_processed)
+        res["sky_data"] = p_sky
 
-            if mode == "fixed_tripod":
-                p_gnd = os.path.join(temp_dir, f"gnd_{idx-1:04d}.bin")
-                save_frame_float32(p_gnd, raw_frame)
-                res["gnd_data"] = p_gnd
+        if mode == "fixed_tripod":
+            p_gnd = os.path.join(temp_dir, f"gnd_{idx-1:04d}.bin")
+            save_frame_float32(p_gnd, raw_frame)
+            res["gnd_data"] = p_gnd
 
         del warped_processed, raw_frame
 
@@ -384,12 +308,56 @@ def align_single_light_task(args: tuple) -> dict:
     return res
 
 
-def _process_single_chunk(args):
-    """
-    Procesa un bloque de filas en CPU idéntico al algoritmo de GPU.
-    Utiliza nanmedian y nanmean para garantizar que los bordes con menos tomas
-    no sufran degradación tonal ni pérdida de contraste.
-    """
+# =========================================================================
+# MOTOR MATEMÁTICO EXACTO DE LA VERSIÓN 0.5.5 CON CORRECCIÓN DE MÁRGENES
+# =========================================================================
+
+def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = "standard", lp_strength: float = 0.5) -> np.ndarray:
+    n_frames, actual_rows, w, c = sub_stack_np.shape
+    chunk_result = np.zeros((actual_rows, w, c), dtype=np.float32)
+
+    sub_stack_gpu = cp.asarray(sub_stack_np)
+
+    if lp_method == "min_rejection" and lp_strength > 1e-4:
+        target_p = max(5.0, 50.0 - (lp_strength * 40.0))
+        for ch in range(c):
+            ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
+            res = cp.percentile(ch_data, target_p, axis=0)
+            chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
+        del sub_stack_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+        return chunk_result
+
+    # Motor original 0.5.5 exacto
+    upper_tol = kappa + 0.8
+    for ch in range(c):
+        ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
+        
+        med = cp.median(ch_data, axis=0)
+        abs_diff = cp.abs(ch_data - med)
+        mad = cp.median(abs_diff, axis=0)
+        sigma = 1.4826 * mad + 1e-6
+
+        low = med - 0.4 * sigma
+        high = med + upper_tol * sigma
+        
+        valid = (ch_data >= low) & (ch_data <= high)
+
+        filtered = cp.where(valid, ch_data, cp.nan)
+        res = cp.nanmean(filtered, axis=0)
+
+        nan_mask = cp.isnan(res)
+        if cp.any(nan_mask):
+            res[nan_mask] = med[nan_mask]
+
+        chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
+
+    del sub_stack_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+    return chunk_result
+
+
+def _process_single_chunk_cpu(args):
     frames_source, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
     actual_rows = y_end - y_start
     n_frames = len(frames_source)
@@ -412,46 +380,38 @@ def _process_single_chunk(args):
 
     chunk_result = np.empty((actual_rows, w, c), dtype=np.float32)
 
-    # Modo Min-Rejection
     if lp_method == "min_rejection" and lp_strength > 1e-4:
         target_p = max(5.0, 50.0 - (lp_strength * 40.0))
         for ch in range(c):
             channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-            res = np.nanpercentile(channel_data, target_p, axis=0)
-            chunk_result[:, :, ch] = np.nan_to_num(res, nan=0.0).reshape((actual_rows, w))
+            res = np.percentile(channel_data, target_p, axis=0)
+            chunk_result[:, :, ch] = res.reshape((actual_rows, w))
         del sub_stack
         return y_start, y_end, chunk_result
 
-    # Apilado por Kappa-Sigma Clipping con protección contra bordes y NaNs
     upper_tol = kappa + 0.8
     for ch in range(c):
         channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-
-        # Mediana ignorando los bordes vacíos fuera de campo
-        med = np.nanmedian(channel_data, axis=0)
+        
+        med = np.median(channel_data, axis=0)
         abs_diff = np.abs(channel_data - med)
-        mad = np.nanmedian(abs_diff, axis=0)
+        mad = np.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
-        # Umbrales de rechazo
-        low = med - 0.5 * sigma
+        low = med - 0.4 * sigma
         high = med + upper_tol * sigma
 
         valid = (channel_data >= low) & (channel_data <= high)
         
-        # Filtramos píxeles descartados asignándoles NaN
-        filtered = np.where(valid, channel_data, np.nan)
+        counts = np.sum(valid, axis=0)
+        sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
         
-        # Media aritmética ignorando descartes y bordes fuera de encuadre
-        with np.errstate(divide='ignore', invalid='ignore'):
-            res = np.nanmean(filtered, axis=0)
-            
-            # Si en algún píxel todas las tomas fueron descartadas, recuperar la mediana
-            nan_mask = np.isnan(res)
-            if np.any(nan_mask):
-                res[nan_mask] = med[nan_mask]
+        fallback = counts == 0
+        counts[fallback] = 1
+        res = sums / counts
+        res[fallback] = med[fallback]
 
-        chunk_result[:, :, ch] = np.nan_to_num(res, nan=0.0).reshape((actual_rows, w))
+        chunk_result[:, :, ch] = res.reshape((actual_rows, w))
 
     del sub_stack
     return y_start, y_end, chunk_result
@@ -460,7 +420,7 @@ def _process_single_chunk(args):
 def parallel_stream_stack(
     frames_source: list, 
     shape: tuple, 
-    chunk_rows: int = 1200, 
+    chunk_rows: int = 200, 
     kappa: float = 2.2, 
     max_workers: int = None,
     lp_method: str = "standard",
@@ -468,6 +428,7 @@ def parallel_stream_stack(
 ) -> np.ndarray:
     h, w, c = shape
     stacked_out = np.zeros((h, w, c), dtype=np.float32)
+    is_ram_mode = isinstance(frames_source[0], np.ndarray)
 
     tasks = []
     for y in range(0, h, chunk_rows):
@@ -475,71 +436,31 @@ def parallel_stream_stack(
         tasks.append((frames_source, y, y_end, w, c, kappa, lp_method, lp_strength))
 
     if max_workers is None:
-        max_workers = max(1, min(4, os.cpu_count() or 4))
+        max_workers = max(1, min(4, (os.cpu_count() or 4) - 1))
 
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-        for y_start, y_end, chunk_data in executor.map(_process_single_chunk, tasks):
-            stacked_out[y_start:y_end, :, :] = chunk_data
+    if is_ram_mode:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for y_start, y_end, chunk_data in executor.map(_process_single_chunk_cpu, tasks):
+                stacked_out[y_start:y_end, :, :] = chunk_data
+    else:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            for y_start, y_end, chunk_data in executor.map(_process_single_chunk_cpu, tasks):
+                stacked_out[y_start:y_end, :, :] = chunk_data
 
     gc.collect()
     return stacked_out
 
 
-def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = "standard", lp_strength: float = 0.5) -> np.ndarray:
-    n_frames, actual_rows, w, c = sub_stack_np.shape
-    chunk_result = np.zeros((actual_rows, w, c), dtype=np.float32)
-
-    sub_stack_gpu = cp.asarray(sub_stack_np)
-
-    if lp_method == "min_rejection" and lp_strength > 1e-4:
-        target_p = max(5.0, 50.0 - (lp_strength * 40.0))
-        for ch in range(c):
-            ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
-            res = cp.percentile(ch_data, target_p, axis=0)
-            chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
-        del sub_stack_gpu
-        cp.get_default_memory_pool().free_all_blocks()
-        return chunk_result
-
-    for ch in range(c):
-        ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
-        med = cp.median(ch_data, axis=0)
-        abs_diff = cp.abs(ch_data - med)
-        mad = cp.median(abs_diff, axis=0)
-        sigma = 1.4826 * mad + 1e-6
-
-        low = med - 0.4 * sigma
-        high = med + (kappa + 0.8) * sigma
-        valid = (ch_data >= low) & (ch_data <= high)
-
-        filtered = cp.where(valid, ch_data, cp.nan)
-        res = cp.nanmean(filtered, axis=0)
-
-        nan_mask = cp.isnan(res)
-        if cp.any(nan_mask):
-            res[nan_mask] = med[nan_mask]
-
-        chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
-
-    del sub_stack_gpu
-    cp.get_default_memory_pool().free_all_blocks()
-    return chunk_result
-
-
 def stream_stack_auto(
     frames_source: list, 
     shape: tuple, 
-    chunk_rows: int = 1000, 
+    chunk_rows: int = 200, 
     kappa: float = 2.2,
     lp_method: str = "standard",
     lp_strength: float = 0.5,
     use_gpu: bool = None
 ) -> np.ndarray:
-    """
-    Apilamiento por streaming automático con fallback.
-    Acepta tanto listas de archivos en disco (.bin) como listas de matrices NumPy en RAM.
-    """
     h, w, c = shape
     n_frames = len(frames_source)
     is_ram_mode = isinstance(frames_source[0], np.ndarray)
@@ -558,8 +479,8 @@ def stream_stack_auto(
 
                 if is_ram_mode:
                     sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
-                    for i, arr in enumerate(frames_source):
-                        sub_stack[i] = arr[y:y_end]
+                    for i in range(n_frames):
+                        sub_stack[i] = frames_source[i][y:y_end]
                 else:
                     offset = y * bytes_per_row
                     current_read_bytes = actual_rows * bytes_per_row
@@ -582,9 +503,13 @@ def stream_stack_auto(
                 del sub_stack
 
             return stacked_out
-        except Exception:
-            # Fallback seguro a CPU ante cualquier desbordamiento de memoria VRAM
-            pass
+        except Exception as exc:
+            print(f"[CuPy Fallback]: {exc}")
+            if HAS_GPU:
+                try:
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
 
     return parallel_stream_stack(
         frames_source, 

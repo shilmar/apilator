@@ -214,21 +214,23 @@ class StackingWorker(QThread):
 
             ref_raw_ground = ref_raw.copy() if (ground_mode == "reference" and sky_mask is not None) else None
 
-            if use_ram_buffer:
-                sky_frames_collection.append(ref_sky_processed)
-                if need_stack_ground:
-                    ground_frames_collection.append(ref_raw.copy())
-            else:
-                p_sky_0 = os.path.join(temp_dir, "sky_0000.bin")
-                save_frame_float32(p_sky_0, ref_sky_processed)
-                sky_frames_collection.append(p_sky_0)
+            # Guardado directo de la referencia en el directorio temporal (.bin)
+            p_sky_0 = os.path.join(temp_dir, "sky_0000.bin")
+            save_frame_float32(p_sky_0, ref_sky_processed)
+            sky_frames_collection.append(p_sky_0)
 
-                if need_stack_ground:
-                    p_gnd_0 = os.path.join(temp_dir, "gnd_0000.bin")
-                    save_frame_float32(p_gnd_0, ref_raw)
-                    ground_frames_collection.append(p_gnd_0)
+            if need_stack_ground:
+                p_gnd_0 = os.path.join(temp_dir, "gnd_0000.bin")
+                save_frame_float32(p_gnd_0, ref_raw)
+                ground_frames_collection.append(p_gnd_0)
 
-            del ref_raw, ref_sky, ref_sky_processed
+            # Liberación segura de variables sin colisiones de scope
+            for var in ['ref_raw', 'ref_sky', 'ref_sky_processed']:
+                if var in locals():
+                    try:
+                        del locals()[var]
+                    except Exception:
+                        pass
             gc.collect()
 
             dt_ref = time.perf_counter() - t0_ref
@@ -342,7 +344,7 @@ class StackingWorker(QThread):
             sky_stacked = stream_stack_auto(
                 sky_frames_collection, 
                 (h, w, c), 
-                chunk_rows=800, 
+                chunk_rows=200, 
                 kappa=kappa,
                 lp_method=lp_method,
                 lp_strength=lp_strength,
@@ -380,7 +382,7 @@ class StackingWorker(QThread):
                     ground_layer = stream_stack_auto(
                         ground_frames_collection, 
                         (h, w, c), 
-                        chunk_rows=800, 
+                        chunk_rows=200, 
                         kappa=kappa,
                         use_gpu=use_gpu
                     )
@@ -460,6 +462,12 @@ class StackingWorker(QThread):
                     pass
 
             out32_clean = np.ascontiguousarray(final_composite.astype(np.float32))
+
+            # Blindaje contra NaNs e Infs generados por CUDA/OpenCV en divisiones por cero
+            if np.isnan(out32_clean).any() or np.isinf(out32_clean).any():
+                out32_clean = np.nan_to_num(out32_clean, nan=0.0, posinf=1.0, neginf=0.0)
+            out32_clean = np.clip(out32_clean, 0.0, 1.0)
+
             tifffile.imwrite(output_path, out32_clean, compression='zlib', photometric='rgb')
             del out32_clean, final_composite
 
@@ -474,16 +482,21 @@ class StackingWorker(QThread):
 
         except Exception as exc:
             if not self._is_cancelled:
-                self.error_occurred.emit(str(exc))
+                import traceback
+                err_detail = traceback.format_exc()
+                err_msg = str(exc).strip() or exc.__class__.__name__
+                print(f"\n[TRACEBACK COMPLETO WORKER]:\n{err_detail}")
+                self.error_occurred.emit(f"{err_msg}\n\nDetalle técnico:\n{err_detail[-300:]}")
             else:
                 self.cancelled.emit()
+                
         finally:
             sky_frames_collection.clear()
             ground_frames_collection.clear()
             gc.collect()
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
-
+                
 
 class GraXpertWorker(QThread):
     finished_success = Signal(np.ndarray)

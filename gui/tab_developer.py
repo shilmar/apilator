@@ -634,7 +634,14 @@ class DeveloperTab(QWidget):
         self.slider_ond_bg.setEnabled(False)
         
         try:
-            self.image_32bit = load_image_as_float32(filepath)
+            raw_img = load_image_as_float32(filepath)
+            
+            # Saneamiento preventivo de NaNs e infinitos
+            if np.isnan(raw_img).any() or np.isinf(raw_img).any():
+                self.log_message("[AVISO] La imagen contenía píxeles indefinidos (NaN/Inf). Han sido saneados automáticamente.")
+                raw_img = np.nan_to_num(raw_img, nan=0.0, posinf=1.0, neginf=0.0)
+
+            self.image_32bit = np.clip(raw_img, 0.0, 1.0).astype(np.float32)
             self._generate_preview_proxy()
             self.apply_auto_mtf()
             self.log_message(f"Imagen en memoria ({self.image_32bit.shape[1]}x{self.image_32bit.shape[0]} px). Vista acelerada activa.")
