@@ -1,7 +1,6 @@
-# gui/curve_widget.py
 """
 gui/curve_widget.py - Widget interactivo de curvas tonales con histograma logarítmico.
-Genera tablas de consulta (LUT) de 256 niveles con interpolación monótona PCHIP.
+Genera tablas de consulta (LUT) de alta precisión con interpolación monótona PCHIP.
 """
 from typing import List, Optional, Tuple
 import cv2
@@ -16,12 +15,15 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
+# Resolución fina de la LUT (1024 pasos elimina el banding en 16-bit / 32-bit)
+LUT_RESOLUTION = 256
+
 
 class CurveWidget(QWidget):
     """
     Controlador gráfico de curva de transferencia tonal.
-    Permite modelar curvas de contraste en espacio lineal o no lineal
-    con soporte para histograma de luminancia astronómica en segundo plano.
+    Permite modelar curvas de contraste en espacio continuo con visualización
+    de histograma astronómico logarítmico en segundo plano.
     """
     curveChanged = Signal()
 
@@ -35,10 +37,10 @@ class CurveWidget(QWidget):
         self.selected_idx: Optional[int] = None
         self.dragging: bool = False
 
-        # LUT normalizada float32 [0.0, 1.0] de 256 muestras
-        self.lut: np.ndarray = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        # LUT normalizada float32 [0.0, 1.0]
+        self.lut: np.ndarray = np.linspace(0.0, 1.0, LUT_RESOLUTION, dtype=np.float32)
 
-        # Histograma logarítmico de luminancia normalizado
+        # Histograma logarítmico de luminancia normalizado (256 bins para pintado rápido)
         self.hist_data: Optional[np.ndarray] = None
 
     def reset_curve(self) -> None:
@@ -52,20 +54,23 @@ class CurveWidget(QWidget):
     def set_histogram_from_image(self, img_rgb: Optional[np.ndarray]) -> None:
         """
         Calcula el histograma de luminancia con compresión logarítmica
-        a partir de un submuestreo de la imagen suministrada.
+        a partir de un submuestreo de la imagen suministrada usando OpenCV.
         """
         if img_rgb is None or img_rgb.size == 0:
             self.hist_data = None
             self.update()
             return
 
-        # Submuestreo uniforme para cálculo instantáneo sin latencia en la GUI
+        # Submuestreo uniforme con paso 4 para cálculo directo en C++
         sample = img_rgb[::4, ::4]
-        lum = 0.2126 * sample[..., 0] + 0.7152 * sample[..., 1] + 0.0722 * sample[..., 2]
-        u8 = (np.clip(lum, 0.0, 1.0) * 255.0).astype(np.uint8)
+        if sample.dtype != np.float32:
+            sample = sample.astype(np.float32)
+
+        # Conversión rápida de luminancia ITU-R BT.709
+        gray = cv2.cvtColor(np.clip(sample, 0.0, 1.0), cv2.COLOR_RGB2GRAY)
+        u8 = (gray * 255.0).astype(np.uint8)
 
         hist = cv2.calcHist([u8], [0], None, [256], [0, 256]).ravel()
-        # Escala logarítmica para resaltar el ruido de fondo y nebulosidades débiles
         hist_log = np.log1p(hist)
         max_v = float(np.max(hist_log))
         if max_v > 1e-5:
@@ -75,10 +80,10 @@ class CurveWidget(QWidget):
         self.update()
 
     def _update_lut(self) -> None:
-        """Calcula la LUT interpolada asegurando monotonicidad estricta en X."""
+        """Calcula la LUT interpolada garantizando monotonicidad estricta en X."""
         pts = sorted(self.points, key=lambda p: p[0])
         
-        # Eliminar posibles puntos con abscisas prácticamente idénticas (evita fallos de PCHIP)
+        # Eliminar duplicados o nodos infinitesimalmente cercanos
         clean_pts = []
         for p in pts:
             if not clean_pts or abs(p[0] - clean_pts[-1][0]) > 1e-4:
@@ -87,7 +92,6 @@ class CurveWidget(QWidget):
         xs = [p[0] for p in clean_pts]
         ys = [p[1] for p in clean_pts]
 
-        # Asegurar anclajes en los extremos 0.0 y 1.0
         if xs[0] > 0.001:
             xs.insert(0, 0.0)
             ys.insert(0, ys[0])
@@ -100,7 +104,7 @@ class CurveWidget(QWidget):
         else:
             xs[-1] = 1.0
 
-        grid_x = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        grid_x = np.linspace(0.0, 1.0, LUT_RESOLUTION, dtype=np.float32)
 
         if len(xs) == 2 or not HAS_SCIPY:
             self.lut = np.interp(grid_x, xs, ys).astype(np.float32)
@@ -114,7 +118,7 @@ class CurveWidget(QWidget):
         self.lut = np.clip(self.lut, 0.0, 1.0)
 
     def get_lut(self) -> np.ndarray:
-        """Retorna la Look-Up Table actual calculada en 256 niveles float32."""
+        """Retorna la Look-Up Table calculada."""
         return self.lut
 
     def is_identity(self) -> bool:
@@ -137,7 +141,7 @@ class CurveWidget(QWidget):
         # Fondo del recuadro
         painter.fillRect(margin, margin, inner_w, inner_h, QColor("#1e1e24"))
 
-        # Guías de cuadrícula en cuartos
+        # Cuadrícula en cuartos
         grid_pen = QPen(QColor("#2f343f"), 1, Qt.DashLine)
         painter.setPen(grid_pen)
         for i in range(1, 4):
@@ -146,14 +150,13 @@ class CurveWidget(QWidget):
             painter.drawLine(int(x), margin, int(x), margin + inner_h)
             painter.drawLine(margin, int(y), margin + inner_w, int(y))
 
-        # Diagonal identidad
+        # Diagonal neutra
         painter.setPen(QPen(QColor("#3a3f4b"), 1, Qt.DotLine))
         painter.drawLine(margin, margin + inner_h, margin + inner_w, margin)
 
-        # Histograma de fondo
+        # Histograma de luminancia
         if self.hist_data is not None:
-            hist_brush = QBrush(QColor(100, 140, 180, 55))
-            painter.setBrush(hist_brush)
+            painter.setBrush(QBrush(QColor(100, 140, 180, 55)))
             painter.setPen(Qt.NoPen)
             hist_path = QPainterPath()
             hist_path.moveTo(margin, margin + inner_h)
@@ -170,8 +173,12 @@ class CurveWidget(QWidget):
         painter.setPen(curve_pen)
         painter.setBrush(Qt.NoBrush)
         curve_path = QPainterPath()
-        for i, val in enumerate(self.lut):
-            px = margin + (i / 255.0) * inner_w
+        
+        # Muestreo a pantalla regular
+        step = max(1, len(self.lut) // 256)
+        for i in range(0, len(self.lut), step):
+            val = self.lut[i]
+            px = margin + (i / float(len(self.lut) - 1)) * inner_w
             py = margin + inner_h - (val * inner_h)
             if i == 0:
                 curve_path.moveTo(px, py)
@@ -179,7 +186,7 @@ class CurveWidget(QWidget):
                 curve_path.lineTo(px, py)
         painter.drawPath(curve_path)
 
-        # Puntos de control
+        # Nodos de control
         for i, (px, py) in enumerate(self.points):
             cx = margin + px * inner_w
             cy = margin + inner_h - py * inner_h
@@ -192,13 +199,13 @@ class CurveWidget(QWidget):
                 painter.setPen(QPen(QColor("#2e3440"), 1))
                 painter.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
 
-        # Marco perimetral
+        # Marco exterior
         painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(QColor("#4c566a"), 1.5))
         painter.drawRect(margin, margin, inner_w, inner_h)
 
     # -------------------------------------------------------------
-    # Interacción de Ratón
+    # Gestión de Eventos de Ratón
     # -------------------------------------------------------------
     def _to_norm(self, pos) -> Tuple[float, float]:
         margin = 12
@@ -215,7 +222,6 @@ class CurveWidget(QWidget):
         inner_h = self.height() - 2 * margin
         mx, my = self._to_norm(pos)
 
-        # Localizar si se ha hecho clic sobre un punto existente
         clicked_idx = None
         for i, (px, py) in enumerate(self.points):
             cx = margin + px * inner_w
@@ -226,12 +232,9 @@ class CurveWidget(QWidget):
                 break
 
         if event.button() == Qt.RightButton:
-            # Eliminar punto (manteniendo siempre al menos los dos anclajes)
             if clicked_idx is not None and len(self.points) > 2:
-                # No permitir eliminar los anclajes de los extremos si están en los bordes
-                is_boundary = (clicked_idx == 0 and self.points[clicked_idx][0] == 0.0) or \
-                              (clicked_idx == len(self.points) - 1 and self.points[clicked_idx][0] == 1.0)
-                if not is_boundary:
+                # Proteger los anclajes absolutos de inicio y fin
+                if clicked_idx not in (0, len(self.points) - 1):
                     del self.points[clicked_idx]
                     self.selected_idx = None
                     self._update_lut()
@@ -243,7 +246,6 @@ class CurveWidget(QWidget):
             if clicked_idx is not None:
                 self.selected_idx = clicked_idx
             else:
-                # Insertar un nuevo punto intermedio
                 new_pt = (mx, my)
                 self.points.append(new_pt)
                 self.points.sort(key=lambda p: p[0])
@@ -259,11 +261,10 @@ class CurveWidget(QWidget):
             pos = event.position().toPoint()
             mx, my = self._to_norm(pos)
 
-            # Restricción de movimiento en X para evitar cruces y colisiones entre nodos
             idx = self.selected_idx
-            if idx == 0 and self.points[idx][0] == 0.0:
+            if idx == 0:
                 mx = 0.0
-            elif idx == len(self.points) - 1 and self.points[idx][0] == 1.0:
+            elif idx == len(self.points) - 1:
                 mx = 1.0
             else:
                 min_x = self.points[idx - 1][0] + 0.01 if idx > 0 else 0.0

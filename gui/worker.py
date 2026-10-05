@@ -17,7 +17,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from PySide6.QtCore import QThread, Signal
 
 from core.config_manager import load_config
-
 from core.stacking import (
     load_image_as_float32, 
     detect_sky_stars, 
@@ -56,11 +55,16 @@ def evaluate_storage_mode(strategy: str, num_frames: int, h: int, w: int, c: int
 
 
 def _terminate_executor_processes(executor: ProcessPoolExecutor):
-    """Fuerza la terminación inmediata de todos los procesos hijos del pool."""
+    """Fuerza la terminación inmediata y segura de los procesos hijos."""
+    if executor is None:
+        return
     try:
-        for pid, process in executor._processes.items():
-            process.terminate()
-            process.join(timeout=0.1)
+        for pid, process in list(executor._processes.items()):
+            try:
+                process.terminate()
+                process.join(timeout=0.05)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -99,7 +103,7 @@ class StackingWorker(QThread):
         ground_frames_collection = []
 
         try:
-            # 1. Extraer PRIMERO todos los parámetros de self.config
+            # 1. Extracción de configuración y resolución de rutas de trabajo
             lights = self.config.get("lights", [])
             darks = self.config.get("darks", [])
             sky_mask = self.config.get("mask", None)
@@ -108,18 +112,15 @@ class StackingWorker(QThread):
             external_ground_path = self.config.get("external_ground_path", None)
             kappa = float(self.config.get("kappa", 2.2))
 
-            # Resolución inteligente de la ruta de salida en 'stacked_dir'
             app_cfg = load_config()
             default_stacked_dir = app_cfg.get("stacked_dir", os.getcwd())
             raw_output = self.config.get("output_path", "resultado_dual_32bit.tiff")
 
-            # Si es solo un nombre de archivo o ruta relativa, redirigir a la carpeta configurada
             if not os.path.isabs(raw_output):
                 output_path = os.path.normpath(os.path.join(default_stacked_dir, raw_output))
             else:
                 output_path = os.path.normpath(raw_output)
 
-            # Asegurar que el directorio de salida existe físicamente
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             lp_method = self.config.get("lp_method", "standard")
@@ -129,7 +130,6 @@ class StackingWorker(QThread):
             cpu_workers = min(4, max(1, int(self.config.get("cpu_workers", 4))))
             storage_strategy = self.config.get("storage_strategy", "auto")
 
-            # 2. AHORA SÍ: Definir las condiciones dependientes de esas variables
             need_stack_ground = (sky_mask is not None and mode == "fixed_tripod" and ground_mode == "dual")
 
             if len(lights) < 2:
@@ -212,7 +212,6 @@ class StackingWorker(QThread):
                 ref_stats=ref_stats
             )
 
-            # Guardamos la imagen de referencia sin alinear para usarla si el modo es "reference"
             ref_raw_ground = ref_raw.copy() if (ground_mode == "reference" and sky_mask is not None) else None
 
             if use_ram_buffer:
@@ -269,7 +268,6 @@ class StackingWorker(QThread):
                 for future in as_completed(futures):
                     if self._is_cancelled:
                         _terminate_executor_processes(self._executor)
-                        self._executor.shutdown(wait=False, cancel_futures=True)
                         self.status_changed.emit("Alineación cancelada por el usuario.")
                         self.cancelled.emit()
                         return
@@ -293,7 +291,10 @@ class StackingWorker(QThread):
                         )
             finally:
                 if self._executor is not None:
-                    self._executor.shutdown(wait=False)
+                    try:
+                        self._executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
                     self._executor = None
 
             if self._is_cancelled:
@@ -358,7 +359,7 @@ class StackingWorker(QThread):
             self.progress_changed.emit(sky_target_pct)
 
             # ============================================================
-            # OBTENCIÓN DE LA CAPA DE SUELO (Una sola vez según el modo)
+            # OBTENCIÓN DE LA CAPA DE SUELO
             # ============================================================
             ground_layer = None
 
@@ -417,7 +418,6 @@ class StackingWorker(QThread):
                 self.cancelled.emit()
                 return
 
-            # Composición de cielo y suelo (si procede)
             if has_ground and sky_mask is not None and ground_layer is not None:
                 t0_comp = time.perf_counter()
                 self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
@@ -448,17 +448,21 @@ class StackingWorker(QThread):
                 self.cancelled.emit()
                 return
 
-            # Guardado TIFF final
+            # Guardado TIFF final con metadatos fotométricos RGB explícitos
             t0_io = time.perf_counter()
             self.progress_changed.emit(98)
             self.status_changed.emit(f"[Fase 4/4] Guardando TIFF de 32 bits en: {os.path.basename(output_path)}...")
+            
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
                 except Exception:
                     pass
 
-            tifffile.imwrite(output_path, final_composite.astype(np.float32), compression='zlib')
+            out32_clean = np.ascontiguousarray(final_composite.astype(np.float32))
+            tifffile.imwrite(output_path, out32_clean, compression='zlib', photometric='rgb')
+            del out32_clean, final_composite
+
             dt_io = time.perf_counter() - t0_io
             self.status_changed.emit(f"-> Guardado TIFF completado en {dt_io:.1f}s.")
 

@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QGroupBox, QRadioButton, QSlider, QDoubleSpinBox,
     QComboBox, QSplitter, QTextEdit, QSizePolicy, QCheckBox, QSpinBox
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QTextCursor, QColor
+from PySide6.QtCore import Qt, Signal, QCoreApplication
+from PySide6.QtGui import QTextCursor, QCursor
 
 from core.project_manager import ProjectManager
 from core.masking import refine_mask_guided
@@ -71,7 +71,7 @@ class StackerTab(QWidget):
         self.project_mgr = ProjectManager()
         self.lights_list = []
         self.darks_list = []
-        self.ground_list = []  # <--- NUEVA LISTA
+        self.ground_list = []
         self.computed_mask = None
         self.last_stacked_output_path = None
         self.current_ref_path = None
@@ -99,8 +99,8 @@ class StackerTab(QWidget):
         left_layout.setSpacing(6)
 
         # SECCIÓN 1: Gestión de Sesión / Proyecto
-        grp_project = QGroupBox("Sesión de Apilado (.mwstack)")
-        proj_layout = QVBoxLayout(grp_project)
+        self.grp_project = QGroupBox("Sesión de Apilado (.mwstack)")
+        proj_layout = QVBoxLayout(self.grp_project)
         
         self.lbl_session = QLabel("Sesión: Sin guardar")
         self.lbl_session.setStyleSheet("color: #a0a0a0; font-size: 11px;")
@@ -108,25 +108,24 @@ class StackerTab(QWidget):
 
         btn_proj_row = QHBoxLayout()
         
-        # --- NUEVO: Botón Nueva Sesión ---
-        btn_new_sess = QPushButton("Nueva")
-        btn_new_sess.setStyleSheet("font-weight: bold; color: #ffab91;")
-        btn_new_sess.setToolTip("Reiniciar proyecto completo, vaciar tomas, máscaras y revelador")
-        btn_new_sess.clicked.connect(self.on_new_session_clicked)
-        btn_proj_row.addWidget(btn_new_sess)
+        self.btn_new_sess = QPushButton("Nueva")
+        self.btn_new_sess.setStyleSheet("font-weight: bold; color: #ffab91;")
+        self.btn_new_sess.setToolTip("Reiniciar proyecto completo, vaciar tomas, máscaras y revelador")
+        self.btn_new_sess.clicked.connect(self.on_new_session_clicked)
+        btn_proj_row.addWidget(self.btn_new_sess)
 
-        btn_open_sess = QPushButton("Cargar")
-        btn_open_sess.clicked.connect(self.open_project)
-        btn_save_sess = QPushButton("Guardar")
-        btn_save_sess.clicked.connect(self.save_project)
-        btn_save_as_sess = QPushButton("Guardar Como...")
-        btn_save_as_sess.clicked.connect(self.save_project_as)
+        self.btn_open_sess = QPushButton("Cargar")
+        self.btn_open_sess.clicked.connect(self.open_project)
+        self.btn_save_sess = QPushButton("Guardar")
+        self.btn_save_sess.clicked.connect(self.save_project)
+        self.btn_save_as_sess = QPushButton("Guardar Como...")
+        self.btn_save_as_sess.clicked.connect(self.save_project_as)
 
-        btn_proj_row.addWidget(btn_open_sess)
-        btn_proj_row.addWidget(btn_save_sess)
-        btn_proj_row.addWidget(btn_save_as_sess)
+        btn_proj_row.addWidget(self.btn_open_sess)
+        btn_proj_row.addWidget(self.btn_save_sess)
+        btn_proj_row.addWidget(self.btn_save_as_sess)
         proj_layout.addLayout(btn_proj_row)
-        left_layout.addWidget(grp_project)
+        left_layout.addWidget(self.grp_project)
 
         # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Suelo)
         self.tabs_files = QTabWidget()
@@ -145,33 +144,32 @@ class StackerTab(QWidget):
         left_layout.addWidget(self.tabs_files, stretch=1)
 
         btn_box = QHBoxLayout()
-        btn_add = QPushButton("Añadir Tomas...")
-        btn_add.clicked.connect(self.add_current_tab_files)
-        btn_clear = QPushButton("Limpiar Pestaña")
-        btn_clear.clicked.connect(self.clear_current_tab_files)
-        btn_box.addWidget(btn_add)
-        btn_box.addWidget(btn_clear)
+        self.btn_add_files = QPushButton("Añadir Tomas...")
+        self.btn_add_files.clicked.connect(self.add_current_tab_files)
+        self.btn_clear_files = QPushButton("Limpiar Pestaña")
+        self.btn_clear_files.clicked.connect(self.clear_current_tab_files)
+        btn_box.addWidget(self.btn_add_files)
+        btn_box.addWidget(self.btn_clear_files)
         left_layout.addLayout(btn_box)
 
         # SECCIÓN 3: Parámetros de Apilado
-        grp_settings = QGroupBox("Parámetros de Integración")
-        set_layout = QVBoxLayout(grp_settings)
+        self.grp_settings = QGroupBox("Parámetros de Integración")
+        set_layout = QVBoxLayout(self.grp_settings)
         set_layout.addWidget(QLabel("Modo de Captura:"))
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Trípode Fijo (Suelo Estático)", "Star Tracker (Seguimiento)"])
+        self.combo_mode.currentIndexChanged.connect(self._on_capture_mode_changed)
         set_layout.addWidget(self.combo_mode)
 
-        # --- NUEVO: Tratamiento del Suelo ---
+        # Tratamiento del Suelo
         set_layout.addWidget(QLabel("Tratamiento del Suelo:"))
         self.combo_ground = QComboBox()
         self.combo_ground.addItems([
             "Apilar Suelo Completo (Dual)",
             "Suelo de Referencia (Sin apilar)",
-            "Cargar Suelo cargado"
+            "Usar Toma de Pestaña Suelo"
         ])
-        #self.combo_ground.currentIndexChanged.connect(self._on_ground_mode_changed)
         set_layout.addWidget(self.combo_ground)
-
 
         set_layout.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
         self.spin_kappa = QDoubleSpinBox()
@@ -179,11 +177,11 @@ class StackerTab(QWidget):
         self.spin_kappa.setValue(2.2)
         self.spin_kappa.setSingleStep(0.1)
         set_layout.addWidget(self.spin_kappa)
-        left_layout.addWidget(grp_settings)
+        left_layout.addWidget(self.grp_settings)
 
-        # --- Reducción de Polución en Apilado ---
-        grp_stack_lp = QGroupBox("Antipolución en Apilado")
-        layout_stack_lp = QVBoxLayout(grp_stack_lp)
+        # Antipolución en Apilado
+        self.grp_stack_lp = QGroupBox("Antipolución en Apilado")
+        layout_stack_lp = QVBoxLayout(self.grp_stack_lp)
 
         row_lp_algo = QHBoxLayout()
         row_lp_algo.addWidget(QLabel("Algoritmo:"))
@@ -209,12 +207,11 @@ class StackerTab(QWidget):
         self.slider_stack_lp.valueChanged.connect(self._on_stack_lp_changed)
         layout_stack_lp.addWidget(self.slider_stack_lp)
 
-        # Se inserta en el layout de controles de apilado
-        left_layout.addWidget(grp_stack_lp)
+        left_layout.addWidget(self.grp_stack_lp)
 
         # SECCIÓN 4: Máscara Cielo / Suelo
-        grp_mask = QGroupBox("Máscara Cielo / Suelo")
-        mask_layout = QVBoxLayout(grp_mask)
+        self.grp_mask = QGroupBox("Máscara Cielo / Suelo")
+        mask_layout = QVBoxLayout(self.grp_mask)
 
         row_mask_toggles = QHBoxLayout()
         self.chk_show_mask = QCheckBox("Mostrar Máscara")
@@ -243,7 +240,7 @@ class StackerTab(QWidget):
         self.slider_brush.valueChanged.connect(self.update_brush_slider)
         mask_layout.addWidget(self.slider_brush)
 
-        # Controles finos de Refinamiento
+        # Controles de Refinamiento
         row_params = QHBoxLayout()
         row_params.addWidget(QLabel("Suavizado Borde:"))
         self.spin_feather = QSpinBox()
@@ -260,24 +257,24 @@ class StackerTab(QWidget):
         mask_layout.addLayout(row_params)
 
         btn_mask_actions = QHBoxLayout()
-        btn_refine = QPushButton("Refinar Automática")
-        btn_refine.clicked.connect(self.refine_mask)
-        btn_clear_m = QPushButton("Limpiar Máscara")
-        btn_clear_m.setStyleSheet("color: #ff9e80;")
-        btn_clear_m.clicked.connect(self.clear_mask)
-        btn_mask_actions.addWidget(btn_refine)
-        btn_mask_actions.addWidget(btn_clear_m)
+        self.btn_refine = QPushButton("Refinar Automática")
+        self.btn_refine.clicked.connect(self.refine_mask)
+        self.btn_clear_m = QPushButton("Limpiar Máscara")
+        self.btn_clear_m.setStyleSheet("color: #ff9e80;")
+        self.btn_clear_m.clicked.connect(self.clear_mask)
+        btn_mask_actions.addWidget(self.btn_refine)
+        btn_mask_actions.addWidget(self.btn_clear_m)
         mask_layout.addLayout(btn_mask_actions)
 
         btn_mask_io = QHBoxLayout()
-        btn_load_m = QPushButton("Cargar PNG")
-        btn_load_m.clicked.connect(self.load_mask)
-        btn_save_m = QPushButton("Exportar PNG")
-        btn_save_m.clicked.connect(self.save_mask)
-        btn_mask_io.addWidget(btn_load_m)
-        btn_mask_io.addWidget(btn_save_m)
+        self.btn_load_m = QPushButton("Cargar PNG")
+        self.btn_load_m.clicked.connect(self.load_mask)
+        self.btn_save_m = QPushButton("Exportar PNG")
+        self.btn_save_m.clicked.connect(self.save_mask)
+        btn_mask_io.addWidget(self.btn_load_m)
+        btn_mask_io.addWidget(self.btn_save_m)
         mask_layout.addLayout(btn_mask_io)
-        left_layout.addWidget(grp_mask)
+        left_layout.addWidget(self.grp_mask)
         
         # SECCIÓN 5: Registro y Ejecución
         left_layout.addWidget(QLabel("Registro de Actividad:"))
@@ -300,7 +297,6 @@ class StackerTab(QWidget):
         self.btn_run.setStyleSheet(
             "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
         )
-        # Cambiamos la conexión directa por el handler dinámico
         self.btn_run.clicked.connect(self._on_btn_run_clicked)
         left_layout.addWidget(self.btn_run)
 
@@ -314,7 +310,14 @@ class StackerTab(QWidget):
         self.txt_log.append(text)
         self.txt_log.moveCursor(QTextCursor.End)
 
-    # --- Reconstrucción de la lista visual con filas interactivas ---
+    def _on_capture_mode_changed(self, idx: int):
+        """Si es star tracker, inhabilita el modo de apilar suelo de ráfaga."""
+        is_fixed = (idx == 0)
+        self.combo_ground.setEnabled(is_fixed)
+        if not is_fixed:
+            self.log_message("[MODO] Star Tracker activado: apilado restringido al cielo en movimiento.")
+
+    # --- Reconstrucción de la lista visual ---
     def _refresh_list_view(self, tab_name: str):
         if tab_name == "Lights":
             widget_list = self.list_lights
@@ -395,7 +398,7 @@ class StackerTab(QWidget):
                 if p not in self.ground_list:
                     self.ground_list.append(p)
             self._refresh_list_view("Suelo")
-            self.combo_ground.setCurrentIndex(2)  # Activa automáticamente el modo Suelo Externo
+            self.combo_ground.setCurrentIndex(2)
             self.log_message(f"Añadida(s) {len(paths)} toma(s) de Suelo. Modo suelo actualizado a 'Usar Toma de Pestaña Suelo'.")
 
     def clear_current_tab_files(self):
@@ -420,7 +423,6 @@ class StackerTab(QWidget):
         row = self.list_lights.row(item)
         if 0 <= row < len(self.lights_list):
             selected_path = self.lights_list[row]
-            # Mover la imagen seleccionada al inicio para que actúe como referencia del apilado
             self.lights_list.remove(selected_path)
             self.lights_list.insert(0, selected_path)
             self.load_frame_to_canvas(selected_path)
@@ -430,7 +432,8 @@ class StackerTab(QWidget):
     def load_frame_to_canvas(self, path: str):
         self.current_ref_path = path
         self.log_message(f"Cargando toma de referencia: {os.path.basename(path)}...")
-        self.repaint()
+        self.setCursor(Qt.WaitCursor)
+        QCoreApplication.processEvents()
         try:
             img = load_image_as_float32(path)
             self.canvas.load_image(img)
@@ -438,6 +441,8 @@ class StackerTab(QWidget):
         except Exception as e:
             self.log_message(f"[ERROR] Al cargar {os.path.basename(path)}: {e}")
             QMessageBox.critical(self, "Error al cargar imagen", f"No se pudo cargar {path}:\n{e}")
+        finally:
+            self.unsetCursor()
 
     # --- Métodos de Máscara ---
     def update_brush_mode(self):
@@ -463,12 +468,9 @@ class StackerTab(QWidget):
             QMessageBox.warning(self, "Aviso", "Debes pintar al menos un trazo verde (cielo) y uno rojo (suelo).")
             return
 
-        # 1. Feedback de inicio
         self.log_message("[MÁSCARA] Iniciando refinamiento automático...")
-        from PySide6.QtCore import QCoreApplication
-        from PySide6.QtGui import QCursor
         self.setCursor(Qt.WaitCursor)
-        QCoreApplication.processEvents()  # Fuerza a Qt a pintar el mensaje y cambiar el cursor de inmediato
+        QCoreApplication.processEvents()
 
         feather = self.spin_feather.value()
         iters = self.spin_iter.value()
@@ -482,9 +484,7 @@ class StackerTab(QWidget):
                 iterations=iters
             )
             self.canvas.set_refined_mask(self.computed_mask)
-            
             elapsed = time.perf_counter() - t_start
-            # 2. Mensaje inequívoco de finalización con tiempo medido
             self.log_message(f"✓ [MÁSCARA FINALIZADA] Refinamiento completado con éxito en {elapsed:.2f} s (Borde: {feather}px, Pasos: {iters}).")
         except Exception as e:
             self.log_message(f"[ERROR MÁSCARA] Falló el refinado: {e}")
@@ -620,9 +620,9 @@ class StackerTab(QWidget):
     def _do_save(self, filepath: str):
         self.project_mgr.data["light_frames"] = self.lights_list
         self.project_mgr.data["dark_frames"] = self.darks_list
-        self.project_mgr.data["ground_frames"] = self.ground_list  # <--- NUEVO
+        self.project_mgr.data["ground_frames"] = self.ground_list
         self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
-        self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()  # <--- NUEVO
+        self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()
         self.project_mgr.data["parameters"] = {
             "kappa": self.spin_kappa.value(),
             "lp_method_idx": self.combo_lp_algo.currentIndex(),
@@ -639,10 +639,10 @@ class StackerTab(QWidget):
     def reset_session(self):
         self.lights_list.clear()
         self.darks_list.clear()
-        self.ground_list.clear()  # <--- Limpieza
+        self.ground_list.clear()
         self.list_lights.clear()
         self.list_darks.clear()
-        self.list_ground.clear()  # <--- Limpieza
+        self.list_ground.clear()
         self.current_ref_path = None
         self.last_stacked_output_path = None
 
@@ -656,7 +656,7 @@ class StackerTab(QWidget):
         self.canvas.update()
 
         self.combo_mode.setCurrentIndex(0)
-        self.combo_ground.setCurrentIndex(0)  # <--- Reset
+        self.combo_ground.setCurrentIndex(0)
         self.spin_kappa.setValue(2.2)
         self.combo_lp_algo.setCurrentIndex(0)
         self.slider_stack_lp.setValue(50)
@@ -685,7 +685,6 @@ class StackerTab(QWidget):
         self._stack_start_time = time.perf_counter()
         self.last_stacked_output_path = out_path
 
-        # Cambiar apariencia a modo CANCELAR
         self._set_ui_busy(True)
         self.btn_run.setEnabled(True)
         self.btn_run.setText("CANCELAR APILADO")
@@ -701,7 +700,6 @@ class StackerTab(QWidget):
         selected_lp_method = lp_methods[lp_mode_idx]
         selected_lp_strength = self.slider_stack_lp.value() / 100.0
 
-        app_cfg = load_config()
         cpu_workers = int(app_cfg.get("cpu_workers", max(1, (os.cpu_count() or 4) - 1)))
 
         try:
@@ -709,14 +707,14 @@ class StackerTab(QWidget):
         except Exception:
             saved_storage = "auto"
             
-        # Mapeo de modo de suelo
-        # 0: "dual", 1: "reference", 2: "external"
         ground_modes = ["dual", "reference", "external"]
         selected_ground_mode = ground_modes[self.combo_ground.currentIndex()]
 
         external_path = None
         if selected_ground_mode == "external":
             if not self.ground_list:
+                self._set_ui_busy(False)
+                self._reset_run_button()
                 QMessageBox.warning(
                     self, "Aviso", 
                     "Has seleccionado 'Usar Toma de Pestaña Suelo' pero la pestaña Suelo está vacía.\n"
@@ -746,7 +744,7 @@ class StackerTab(QWidget):
         self.worker.status_changed.connect(self.log_message)
         self.worker.finished_success.connect(self.on_stack_success)
         self.worker.error_occurred.connect(self.on_stack_error)
-        self.worker.cancelled.connect(self.on_stack_cancelled)  # <--- NUEVA CONEXIÓN
+        self.worker.cancelled.connect(self.on_stack_cancelled)
         self.worker.start()
 
     def on_stack_success(self, path):
@@ -803,18 +801,8 @@ class StackerTab(QWidget):
         else:
             self.progress_bar.setFormat("%p%")
 
-    def on_stacking_finished(self, out_path: str):
-        self.progress_bar.setValue(100)
-        self.progress_bar.setFormat("Completado 100%")
-        # Resto de tu lógica para habilitar botones, mostrar mensaje, etc.
-
-    def on_stacking_error(self, err_msg: str):
-        self.progress_bar.setFormat("Error")
-        # Resto de tu lógica de error existente
-        
     def on_new_session_clicked(self):
         """Pide confirmación y resetea la sesión en todo el software."""
-        # Si el worker está apilando, no permitir reiniciar
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.warning(self, "Aviso", "No puedes reiniciar la sesión mientras el apilado está en ejecución.")
             return
@@ -835,11 +823,13 @@ class StackerTab(QWidget):
         
     def _set_ui_busy(self, busy: bool):
         """Bloquea o desbloquea controles secundarios durante el procesamiento."""
+        self.grp_project.setEnabled(not busy)
         self.tabs_files.setEnabled(not busy)
-        self.combo_mode.setEnabled(not busy)
-        self.spin_kappa.setEnabled(not busy)
-        self.combo_lp_algo.setEnabled(not busy)
-        self.slider_stack_lp.setEnabled(not busy)
+        self.btn_add_files.setEnabled(not busy)
+        self.btn_clear_files.setEnabled(not busy)
+        self.grp_settings.setEnabled(not busy)
+        self.grp_stack_lp.setEnabled(not busy)
+        self.grp_mask.setEnabled(not busy)
 
     def _on_btn_run_clicked(self):
         """Alterna entre iniciar el apilado o cancelarlo según el estado del worker."""

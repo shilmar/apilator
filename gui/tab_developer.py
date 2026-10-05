@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QScrollArea, 
     QFrame
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QTextCursor
 from core.stacking import load_image_as_float32
 from core.stretch import (
@@ -70,13 +70,13 @@ class DeveloperTab(QWidget):
         self.multiescala_estructura = 0.0   # -1.0 a +1.0
         self.multiescala_fondo = 0.0        # 0.0 a 1.0
 
-        self.lp_reduction = 0.0  # Rango 0.0 a 1.0 (Reducción contaminación lumínica)
+        self.lp_reduction = 0.0  # Rango 0.0 a 1.0
         self.clarity_starless_val = 0.0
         self.dehaze_starless_val = 0.0
         
         # Parámetros del revelador
-        self.temp_val = 0.0          # Rango: -0.500 a +0.500
-        self.tint_val = 0.0          # Rango: -0.500 a +0.500
+        self.temp_val = 0.0          # -0.500 a +0.500
+        self.tint_val = 0.0          # -0.500 a +0.500
         self.sat_sky_val = 1.0       # 0.00x a 2.50x
         self.sat_gnd_val = 1.0       # 0.00x a 2.50x
         self.vibrance_val = 0.0      # -1.00 a +1.00
@@ -89,12 +89,9 @@ class DeveloperTab(QWidget):
         
         self.star_intensity = 1.0    # 1.0 = 100%, 0.0 = Starless puro
         self.view_layer_mode = 0     # 0: Compuesta, 1: Solo Fondo, 2: Solo Estrellas
-        self.contrast_starless_val = 0.0  # -1.0 a +1.0 (solo para el fondo sin estrellas)
+        self.contrast_starless_val = 0.0
+        self.denoise_strength = 0.0  # <-- CORREGIDO: Inicialización obligatoria
 
-        # Parámetros de Reducción de Ruido
-        #self.denoise_strength = 0.0
-        self.denoise_method = "Bilateral"
-        
         self._setup_ui()
         
     def _setup_ui(self):
@@ -109,17 +106,17 @@ class DeveloperTab(QWidget):
         self.canvas.external_zoom_handler = True
         self.canvas.zoom_toggled.connect(self.on_canvas_zoom_toggled)
 
-        # 2. Panel interno de controles (irá dentro del scroll)
+        # 2. Panel interno de controles
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(6)
 
         # Carga externa
-        btn_open_img = QPushButton("Abrir Imagen (TIFF / FITS / RAW)...")
-        btn_open_img.setStyleSheet("font-weight: bold; padding: 6px;")
-        btn_open_img.clicked.connect(self.open_image_file)
-        left_layout.addWidget(btn_open_img)
+        self.btn_open_img = QPushButton("Abrir Imagen (TIFF / FITS / RAW)...")
+        self.btn_open_img.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.btn_open_img.clicked.connect(self.open_image_file)
+        left_layout.addWidget(self.btn_open_img)
 
         # --- Extracción de Fondo y Gradientes ---
         grp_bg = QGroupBox("Extracción de Fondo y Gradientes")
@@ -148,7 +145,7 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_bg)
 
-        # Control de Atenuación de Cúpula de Contaminación Lumínica
+        # Atenuación de Contaminación Lumínica
         grp_lp = QGroupBox("Contaminación Lumínica")
         layout_lp = QVBoxLayout(grp_lp)
         row_lp = QHBoxLayout()
@@ -295,7 +292,7 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_dn)
         
-        # --- Editor de Curvas con Histograma de Fondo ---
+        # --- Curvas de Tono con Histograma ---
         grp_curves = QGroupBox("Curvas de Tono (Fondo e Histograma)")
         curves_layout = QVBoxLayout(grp_curves)
         curves_layout.setContentsMargins(6, 6, 6, 6)
@@ -314,7 +311,7 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_curves)
               
-        # Módulo Balance de Blancos
+        # Balance de Blancos
         grp_wb = QGroupBox("Balance de Blancos (Precisión Fina)")
         wb_layout = QVBoxLayout(grp_wb)
         wb_layout.setSpacing(3)
@@ -348,12 +345,11 @@ class DeveloperTab(QWidget):
         wb_layout.addWidget(btn_reset_wb)
         left_layout.addWidget(grp_wb)
 
-        # --- NUEVO: Módulo Ajuste Tonal de Suelo ---
+        # Ajuste Tonal Suelo
         grp_gnd_tone = QGroupBox("Ajuste Tonal Suelo (Paisaje)")
         gnd_tone_layout = QVBoxLayout(grp_gnd_tone)
         gnd_tone_layout.setSpacing(3)
 
-        # 1. Exposición Suelo (EV)
         row_gnd_ev = QHBoxLayout()
         row_gnd_ev.addWidget(QLabel("Exposición Suelo:"))
         self.lbl_gnd_ev = QLabel("0.00 EV")
@@ -361,12 +357,11 @@ class DeveloperTab(QWidget):
         gnd_tone_layout.addLayout(row_gnd_ev)
 
         self.slider_gnd_ev = QSlider(Qt.Horizontal)
-        self.slider_gnd_ev.setRange(-200, 300)  # -2.00 EV a +3.00 EV
+        self.slider_gnd_ev.setRange(-200, 300)
         self.slider_gnd_ev.setValue(0)
         self.slider_gnd_ev.valueChanged.connect(self.on_gnd_ev_changed)
         gnd_tone_layout.addWidget(self.slider_gnd_ev)
 
-        # 2. Recuperar Sombras Suelo
         row_gnd_sh = QHBoxLayout()
         row_gnd_sh.addWidget(QLabel("Recuperar Sombras:"))
         self.lbl_gnd_sh = QLabel("0%")
@@ -374,12 +369,11 @@ class DeveloperTab(QWidget):
         gnd_tone_layout.addLayout(row_gnd_sh)
 
         self.slider_gnd_sh = QSlider(Qt.Horizontal)
-        self.slider_gnd_sh.setRange(0, 100)  # 0% a 100%
+        self.slider_gnd_sh.setRange(0, 100)
         self.slider_gnd_sh.setValue(0)
         self.slider_gnd_sh.valueChanged.connect(self.on_gnd_shadows_changed)
         gnd_tone_layout.addWidget(self.slider_gnd_sh)
 
-        # 3. Punto Negro Suelo
         row_gnd_bp = QHBoxLayout()
         row_gnd_bp.addWidget(QLabel("Punto Negro Suelo:"))
         self.lbl_gnd_bp = QLabel("0.000")
@@ -387,7 +381,7 @@ class DeveloperTab(QWidget):
         gnd_tone_layout.addLayout(row_gnd_bp)
 
         self.slider_gnd_bp = QSlider(Qt.Horizontal)
-        self.slider_gnd_bp.setRange(-50, 100)  # -0.050 a +0.100
+        self.slider_gnd_bp.setRange(-50, 100)
         self.slider_gnd_bp.setValue(0)
         self.slider_gnd_bp.valueChanged.connect(self.on_gnd_bp_changed)
         gnd_tone_layout.addWidget(self.slider_gnd_bp)
@@ -398,7 +392,7 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_gnd_tone)
 
-        # Módulo Saturación e Intensidad (Vibrance)
+        # Color e Intensidad
         grp_sat = QGroupBox("Color: Saturación e Intensidad")
         sat_layout = QVBoxLayout(grp_sat)
         sat_layout.setSpacing(3)
@@ -444,7 +438,7 @@ class DeveloperTab(QWidget):
         sat_layout.addWidget(btn_reset_sat)
         left_layout.addWidget(grp_sat)
 
-        # Módulo MTF y Contraste
+        # MTF y Contraste
         grp_stretch = QGroupBox("Estirado Tonal y Contraste")
         stretch_layout = QVBoxLayout(grp_stretch)
         stretch_layout.setSpacing(4)
@@ -505,44 +499,27 @@ class DeveloperTab(QWidget):
         left_layout.addWidget(grp_stretch)
 
         # Exportación
-        btn_export = QPushButton("Exportar Imagen Revelada...")
-        btn_export.setFixedHeight(38)
-        btn_export.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
-        btn_export.clicked.connect(self.export_image)
-        left_layout.addWidget(btn_export)
+        self.btn_export = QPushButton("Exportar Imagen Revelada...")
+        self.btn_export.setFixedHeight(38)
+        self.btn_export.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
+        self.btn_export.clicked.connect(self.export_image)
+        left_layout.addWidget(self.btn_export)
         left_layout.addStretch()
 
-        # Configuración Scroll para la zona de controles
+        # Scroll área
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll_area.setWidget(left_panel)
         scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                background: #1e1e1e;
-                width: 8px;
-                margin: 0px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical {
-                background: #4a4a4a;
-                min-height: 25px;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #606060;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }            
+            QScrollArea { border: none; background-color: transparent; }
+            QScrollBar:vertical { background: #1e1e1e; width: 8px; margin: 0px; border-radius: 4px; }
+            QScrollBar::handle:vertical { background: #4a4a4a; min-height: 25px; border-radius: 4px; }
+            QScrollBar::handle:vertical:hover { background: #606060; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }            
         """)
 
-        # Contenedor Izquierdo Principal (Scroll de controles arriba + Log estático abajo)
         left_container = QWidget()
         left_container_layout = QVBoxLayout(left_container)
         left_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -550,10 +527,8 @@ class DeveloperTab(QWidget):
         left_container.setMinimumWidth(380)
         left_container.setMaximumWidth(520)
 
-        # Scroll arriba con factor de expansión 1
         left_container_layout.addWidget(scroll_area, 1)
 
-        # Log fijo abajo (sin factor de expansión)
         lbl_log = QLabel("Registro del Revelador:")
         lbl_log.setStyleSheet("font-weight: bold; font-size: 11px; margin-left: 10px; margin-top: 4px;")
         left_container_layout.addWidget(lbl_log, 0)
@@ -573,7 +548,6 @@ class DeveloperTab(QWidget):
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 10)
-        
         splitter.setSizes([450, 1400])
         
         layout.addWidget(splitter)
@@ -582,7 +556,6 @@ class DeveloperTab(QWidget):
         self.txt_log.append(text)
         self.txt_log.moveCursor(QTextCursor.End)
 
-    # --- Generación de Proxies ligeros ---
     def _generate_preview_proxy(self):
         if self.image_32bit is None:
             self.preview_proxy = None
@@ -657,7 +630,6 @@ class DeveloperTab(QWidget):
         self.lbl_contrast_starless.setText("0.00")        
         if hasattr(self, 'curve_widget'):
             self.curve_widget.reset_curve()
-        #self.combo_denoise.setEnabled(False)
         self.slider_ond_est.setEnabled(False)
         self.slider_ond_bg.setEnabled(False)
         
@@ -681,19 +653,12 @@ class DeveloperTab(QWidget):
         default_dir = cfg.get("stacked_dir", os.getcwd())
 
         p, _ = QFileDialog.getOpenFileName(
-            self, "Abrir Imagen de Astronomía o RAW", default_dir,
-            filtros
+            self, "Abrir Imagen de Astronomía o RAW", default_dir, filtros
         )
         if p:
             self.load_image_direct(p)
 
-    # --- Composición Dinámica de Capas ---
     def _compose_active_base(self, for_export: bool = False) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Retorna (base_a_procesar, mascara_correspondiente).
-        Si no es exportación y el zoom 100% está activo, recorta la región nativa
-        del sensor que cabe en el tamaño actual del canvas.
-        """
         if for_export:
             starless, stars, base = self.image_starless, self.image_stars, self.image_32bit
             mask_3d = None
@@ -703,7 +668,6 @@ class DeveloperTab(QWidget):
                 mask_3d = np.repeat(m_f[..., np.newaxis], 3, axis=2)
             crop_active = False
         elif self.is_zoomed_100 and self.image_32bit is not None:
-            # Recorte nativo 1:1 directo de la imagen de resolución completa
             h_f, w_f = self.image_32bit.shape[:2]
             cw = min(w_f, self.canvas.width())
             ch = min(h_f, self.canvas.height())
@@ -728,7 +692,6 @@ class DeveloperTab(QWidget):
                 mask_3d = None
             crop_active = True
         else:
-            # Vista general usando el proxy optimizado
             starless, stars, base = self.proxy_starless, self.proxy_stars, self.preview_proxy
             mask_3d = self.proxy_mask
             crop_active = False
@@ -786,7 +749,6 @@ class DeveloperTab(QWidget):
         else:
             return stars, mask_3d
 
-    # --- Cadena de Revelado Compartida ---
     def _apply_pipeline_on_image(self, target_img: np.ndarray, precomputed_mask: np.ndarray = None) -> np.ndarray:
         if target_img is None:
             return None
@@ -811,16 +773,16 @@ class DeveloperTab(QWidget):
 
                 img = (rgb_sky * precomputed_mask) + (rgb_gnd * (1.0 - precomputed_mask))
 
-        # 3. Intensidad (Vibrance selectivo)
+        # 3. Intensidad
         if abs(self.vibrance_val) > 1e-4:
             img = adjust_vibrance(img, self.vibrance_val)
 
-        # Atenuación de Cúpula de Luz
+        # 4. Atenuación de Cúpula de Luz
         if self.lp_reduction > 1e-4:
             mask_2d = precomputed_mask[..., 0] if precomputed_mask is not None else None
             img = apply_light_pollution_gradient(img, strength=self.lp_reduction, height_ratio=0.50, sky_mask=mask_2d)
 
-        # === NUEVO: Ajuste Tonal Diferencial para el Suelo ===
+        # 5. Ajuste Tonal Diferencial para el Suelo
         if precomputed_mask is not None:
             has_gnd_tone_change = (
                 abs(self.gnd_ev_val) > 1e-4 or 
@@ -828,36 +790,29 @@ class DeveloperTab(QWidget):
                 abs(self.gnd_bp_val) > 1e-4
             )
             if has_gnd_tone_change:
-                # Extraemos el suelo actual
                 gnd_part = img.copy()
 
-                # a) Exposición diferencial en escala EV
                 if abs(self.gnd_ev_val) > 1e-4:
                     gnd_part = gnd_part * (2.0 ** self.gnd_ev_val)
 
-                # b) Recuperación de sombras suave (sin quemar medios tonos ni altas luces)
                 if self.gnd_shadows_val > 1e-4:
                     lift_curve = (1.0 - np.clip(gnd_part, 0.0, 1.0)) ** 2
                     gnd_part = gnd_part * (1.0 + self.gnd_shadows_val * lift_curve)
 
-                # c) Ajuste de punto negro / pedestal específico para el suelo
                 if abs(self.gnd_bp_val) > 1e-4:
                     if self.gnd_bp_val < 0.0:
-                        # Hacia la derecha (gnd_bp_val < 0): añade pedestal de luz a las sombras
                         gnd_part = np.clip(gnd_part - self.gnd_bp_val, 0.0, 1.0)
                     else:
-                        # Hacia la izquierda (gnd_bp_val > 0): recorta/oscurece sombras
                         gnd_part = np.clip((gnd_part - self.gnd_bp_val) / max(1e-4, 1.0 - self.gnd_bp_val), 0.0, 1.0)
 
-                # Fusionamos respetando la máscara: precomputed_mask=1 (cielo), 0 (suelo)
                 img = (img * precomputed_mask) + (gnd_part * (1.0 - precomputed_mask))
 
-        # 4. Estirado MTF (espacio visible [0.0, 1.0])
+        # 6. Estirado MTF
         bp_val = self.spin_bp.value()
         m_val = self.spin_mtf.value()
         stretched = manual_stretch(img, black_point=bp_val, midtone=m_val)
 
-        # 5. Editor de Curvas Tonales (Aplica la LUT del CurveWidget)
+        # 7. Curvas Tonales (LUT)
         if not self.curve_widget.is_identity():
             curved = apply_curve_lut(stretched, self.curve_widget.get_lut())
             if precomputed_mask is not None:
@@ -865,7 +820,7 @@ class DeveloperTab(QWidget):
             else:
                 stretched = curved
 
-        # 6. Contraste específico del Fondo (Starless)
+        # 8. Contraste específico del Fondo (Starless)
         if abs(self.contrast_starless_val) > 1e-4:
             if precomputed_mask is not None and np.any(precomputed_mask > 0.5):
                 sky_median = float(np.median(stretched[precomputed_mask > 0.5]))
@@ -878,7 +833,7 @@ class DeveloperTab(QWidget):
             else:
                 stretched = sn_contrasted
 
-        # 7. Contraste Global
+        # 9. Contraste Global
         if abs(self.contrast_val) > 1e-4:
             stretched = adjust_contrast(stretched, self.contrast_val, pivot=None)
 
@@ -896,17 +851,16 @@ class DeveloperTab(QWidget):
 
         if stretched is not None:
             self.canvas.load_image(base_to_render, display_stretched=stretched)
-            # Solo actualizamos histograma en vista completa para no sesgarlo por el recorte
+            # Solo actualizar histograma en vista general para no alterar la escala al hacer zoom 1:1
             if not self.is_zoomed_100:
                 self.curve_widget.set_histogram_from_image(stretched)
 
-    # --- Callbacks StarNet ---
     def run_starnet(self):
         if self.image_32bit is None:
             QMessageBox.warning(self, "Aviso", "Carga o apila una imagen primero.")
             return
 
-        self.btn_starnet.setEnabled(False)
+        self._set_ai_processing_state(True)
         self.log_message("=== INICIANDO SEPARACIÓN STARNET++ AI ===")
         stride = self.spin_stride.value()
 
@@ -921,26 +875,21 @@ class DeveloperTab(QWidget):
         self.sn_worker.start()
 
     def on_starnet_success(self, starless_img: np.ndarray, stars_img: np.ndarray):
-        self.btn_starnet.setEnabled(True)
+        self._set_ai_processing_state(False)
 
-        # Purga de falsos positivos en el suelo/árbol mediante la máscara de cielo
-        sky_mask = getattr(self, "sky_mask", None)
+        # CORREGIDO: Usar self.current_mask en lugar de un inexistente self.sky_mask
+        sky_mask = self.current_mask
         if sky_mask is not None and stars_img is not None:
             h, w = stars_img.shape[:2]
             mask = sky_mask
             if mask.shape[:2] != (h, w):
                 mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
 
-            if mask.ndim == 2:
-                mask_3d = mask[..., np.newaxis]
-            else:
-                mask_3d = mask
+            mask_3d = mask[..., np.newaxis] if mask.ndim == 2 else mask
 
-            # 1. Lo que StarNet creyó que eran estrellas dentro del suelo vuelve al starless (fondo)
-            # para no perder la textura ni el brillo natural de las ramas
+            # Lo que StarNet creyó que eran estrellas en el suelo vuelve al fondo
             starless_img = starless_img + (stars_img * (1.0 - mask_3d))
-
-            # 2. La capa de estrellas queda estrictamente restringida al cielo
+            # Restringir estrellas estrictamente al cielo
             stars_img = stars_img * mask_3d
 
         self.image_starless = np.ascontiguousarray(starless_img, dtype=np.float32)
@@ -951,31 +900,30 @@ class DeveloperTab(QWidget):
         self.slider_contrast_starless.setEnabled(True) 
         self.slider_clarity.setEnabled(True)
         self.slider_dehaze.setEnabled(True)
-        #self.combo_denoise.setEnabled(True)
         self.slider_denoise.setEnabled(True)
         self.slider_ond_est.setEnabled(True)
         self.slider_ond_bg.setEnabled(True)
 
         self._generate_preview_proxy()
         self.update_stretch_preview()
-        self.log_message("[STARNET] Estrellas separadas en lineal y purgadas con máscara de cielo. Capas activadas.")
+        self.log_message("[STARNET] Estrellas separadas y purgadas con máscara de cielo. Capas activadas.")
+
+    def on_starnet_error(self, err_msg: str):
+        self._set_ai_processing_state(False)
+        self.log_message(f"[ERROR STARNET] {err_msg}")
+        QMessageBox.warning(self, "Error en StarNet++", err_msg)
         
     def on_stars_slider_changed(self, val: int):
+        """Ajusta la intensidad relativa de la capa de estrellas separada."""
         self.star_intensity = val / 100.0
         self.lbl_stars.setText(f"{val}%")
         self.update_stretch_preview()
-
-    def on_starnet_error(self, err_msg: str):
-        self.btn_starnet.setEnabled(True)
-        self.log_message(f"[ERROR STARNET] {err_msg}")
-        QMessageBox.warning(self, "Error en StarNet++", err_msg)
 
     def on_layer_mode_changed(self, idx: int):
         self.view_layer_mode = idx
         self.slider_stars.setEnabled(idx == 0)
         self.update_stretch_preview()
 
-    # --- Callbacks Balance de Blancos Fino (+-0.500) ---
     def on_temp_changed(self, val: int):
         self.temp_val = val / 1000.0
         self.lbl_temp_val.setText(f"{self.temp_val:+.3f}")
@@ -999,7 +947,6 @@ class DeveloperTab(QWidget):
         self.slider_tint.blockSignals(False)
         self.update_stretch_preview()
 
-    # --- Callbacks Color e Intensidad ---
     def on_sat_sky_changed(self, val: int):
         self.sat_sky_val = val / 100.0
         self.lbl_sat_sky.setText(f"{self.sat_sky_val:.2f}x")
@@ -1033,7 +980,6 @@ class DeveloperTab(QWidget):
         self.slider_vibrance.blockSignals(False)
         self.update_stretch_preview()
 
-    # --- Callbacks Tono y Contraste ---
     def on_contrast_changed(self, val: int):
         self.contrast_val = val / 100.0
         self.lbl_contrast.setText(f"{self.contrast_val:+.2f}")
@@ -1112,7 +1058,6 @@ class DeveloperTab(QWidget):
             self.zoom_rel_coords = (rel_x, rel_y)
         self.update_stretch_preview()
 
-    # --- Extracción de Fondo ---
     def on_extract_background_clicked(self):
         if self.image_32bit is None:
             return
@@ -1132,7 +1077,7 @@ class DeveloperTab(QWidget):
             except Exception as e:
                 self.log_message(f"[ERROR FONDO] Fallo en cálculo polinómico: {e}")
         else:
-            self.btn_extract_bg.setEnabled(False)
+            self._set_ai_processing_state(True)
             self.log_message("=== INICIANDO GRAXPERT ===")
             self.gx_worker = GraXpertWorker(
                 self.image_32bit,
@@ -1145,7 +1090,7 @@ class DeveloperTab(QWidget):
             self.gx_worker.start()
 
     def on_bg_extraction_success(self, corrected_img: np.ndarray):
-        self.btn_extract_bg.setEnabled(True)
+        self._set_ai_processing_state(False)
         self.image_32bit = np.ascontiguousarray(corrected_img, dtype=np.float32)
         
         self.image_starless = None
@@ -1162,12 +1107,12 @@ class DeveloperTab(QWidget):
         self.lbl_contrast_starless.setText("0.00")
         self.slider_denoise.setEnabled(False)
         self.slider_denoise.setValue(0)
-        #self.combo_denoise.setEnabled(False)
+        self.denoise_strength = 0.0
         self.slider_ond_est.setEnabled(False)
         self.slider_ond_bg.setEnabled(False)
 
     def on_bg_extraction_error(self, err_msg: str):
-        self.btn_extract_bg.setEnabled(True)
+        self._set_ai_processing_state(False)
         self.log_message(f"[ERROR GRAXPERT] {err_msg}")
         QMessageBox.warning(self, "Error en GraXpert", err_msg)
 
@@ -1182,18 +1127,14 @@ class DeveloperTab(QWidget):
         self.update_stretch_preview()
         
     def on_clarity_changed(self, val: int):
-        self.clarity_starless_val = val / 100.0  # Mapea -200..200 a -2.00..+2.00
+        self.clarity_starless_val = val / 100.0
         self.lbl_clarity.setText(f"{self.clarity_starless_val:+.2f}")
         self.update_stretch_preview()
 
     def on_dehaze_changed(self, val: int):
-        self.dehaze_starless_val = val / 100.0  # Mapea -200..200 a -2.00..+2.00
+        self.dehaze_starless_val = val / 100.0
         self.lbl_dehaze.setText(f"{self.dehaze_starless_val:+.2f}")
         self.update_stretch_preview()
-    
-    #def on_denoise_method_changed(self, text: str):
-    #    self.denoise_method = text
-    #    self.update_stretch_preview()
 
     def on_denoise_changed(self, val: int):
         self.denoise_strength = val / 100.0
@@ -1210,7 +1151,6 @@ class DeveloperTab(QWidget):
         self.lbl_ond_bg.setText(f"{val}%")
         self.update_stretch_preview()
     
-    # --- Callbacks Ajuste Tonal Suelo ---
     def on_gnd_ev_changed(self, val: int):
         self.gnd_ev_val = val / 100.0
         self.lbl_gnd_ev.setText(f"{self.gnd_ev_val:+.2f} EV")
@@ -1250,7 +1190,17 @@ class DeveloperTab(QWidget):
 
         self.update_stretch_preview()
     
-    # --- Exportación Multiformato en Resolución Completa ---
+    def _set_ai_processing_state(self, busy: bool):
+        """Bloquea o desbloquea controles mientras se ejecutan tareas pesadas de AI."""
+        self.btn_starnet.setEnabled(not busy)
+        self.btn_extract_bg.setEnabled(not busy)
+        self.btn_open_img.setEnabled(not busy)
+        self.btn_export.setEnabled(not busy)
+        if busy:
+            self.setCursor(Qt.WaitCursor)
+        else:
+            self.unsetCursor()
+
     def export_image(self):
         if self.image_32bit is None:
             return
@@ -1291,29 +1241,31 @@ class DeveloperTab(QWidget):
 
         h_full, w_full = self.image_32bit.shape[:2]
         self.log_message(f"Exportando imagen completa ({w_full}x{h_full} px)...")
+        self.setCursor(Qt.WaitCursor)
+        QCoreApplication.processEvents()
 
-        full_base, _ = self._compose_active_base(for_export=True)
-
-        full_mask = None
-        if self.current_mask is not None:
-            clean_m = np.squeeze(self.current_mask)
-            if clean_m.ndim > 2:
-                clean_m = clean_m[..., 0]
-            clean_m = clean_m.astype(np.float32)
-
-            if clean_m.shape != (h_full, w_full):
-                clean_m = cv2.resize(clean_m, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
-
-            ksize = int(max(15, (min(h_full, w_full) // 150) | 1))
-            if ksize % 2 == 0:
-                ksize += 1
-            sm = cv2.GaussianBlur(clean_m, (ksize, ksize), sigmaX=ksize / 3.0)
-            full_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
-
-        processed = self._apply_pipeline_on_image(full_base, precomputed_mask=full_mask)
-
-        ext = os.path.splitext(p)[1].lower()
         try:
+            full_base, _ = self._compose_active_base(for_export=True)
+
+            full_mask = None
+            if self.current_mask is not None:
+                clean_m = np.squeeze(self.current_mask)
+                if clean_m.ndim > 2:
+                    clean_m = clean_m[..., 0]
+                clean_m = clean_m.astype(np.float32)
+
+                if clean_m.shape != (h_full, w_full):
+                    clean_m = cv2.resize(clean_m, (w_full, h_full), interpolation=cv2.INTER_LINEAR)
+
+                ksize = int(max(15, (min(h_full, w_full) // 150) | 1))
+                if ksize % 2 == 0:
+                    ksize += 1
+                sm = cv2.GaussianBlur(clean_m, (ksize, ksize), sigmaX=ksize / 3.0)
+                full_mask = np.ascontiguousarray(np.repeat(sm[..., np.newaxis], 3, axis=2), dtype=np.float32)
+
+            processed = self._apply_pipeline_on_image(full_base, precomputed_mask=full_mask)
+
+            ext = os.path.splitext(p)[1].lower()
             if ext in ['.jpg', '.jpeg']:
                 bgr8 = cv2.cvtColor((np.clip(processed, 0.0, 1.0) * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
                 cv2.imwrite(p, bgr8, [cv2.IMWRITE_JPEG_QUALITY, 96])
@@ -1335,10 +1287,11 @@ class DeveloperTab(QWidget):
         except Exception as e:
             self.log_message(f"[ERROR EXPORT] Fallo al escribir el archivo: {e}")
             QMessageBox.critical(self, "Error de Exportación", f"Fallo al escribir el archivo:\n{e}")
+        finally:
+            self.unsetCursor()
             
     def reset_all_parameters(self):
         """Devuelve todos los controles y variables del revelador a su estado neutro original."""
-        # 1. Variables internas
         self.lp_reduction = 0.0
         self.clarity_starless_val = 0.0
         self.dehaze_starless_val = 0.0
@@ -1357,9 +1310,7 @@ class DeveloperTab(QWidget):
         self.gnd_ev_val = 0.0
         self.gnd_shadows_val = 0.0
         self.gnd_bp_val = 0.0
-        #self.denoise_method = "Bilateral"
 
-        # 2. Bloquear señales de la UI para evitar recálculos en cadena
         widgets_to_block = [
             self.slider_lp, self.slider_stars, self.slider_contrast_starless,
             self.slider_clarity, self.slider_dehaze, self.slider_ond_est,
@@ -1370,11 +1321,9 @@ class DeveloperTab(QWidget):
             self.spin_mtf, self.slider_mtf,
             self.slider_gnd_ev, self.slider_gnd_sh, self.slider_gnd_bp,
         ]
-        #self.combo_denoise,
         for w in widgets_to_block:
             w.blockSignals(True)
 
-        # 3. Restaurar valores y etiquetas de la UI
         self.slider_lp.setValue(0)
         self.lbl_lp.setText("0%")
 
@@ -1405,8 +1354,6 @@ class DeveloperTab(QWidget):
         self.lbl_ond_bg.setText("0%")
         self.slider_ond_bg.setEnabled(False)
 
-        #self.combo_denoise.setCurrentIndex(0)
-        #self.combo_denoise.setEnabled(False)
         self.slider_denoise.setValue(0)
         self.lbl_denoise.setText("0%")
         self.slider_denoise.setEnabled(False)
@@ -1447,45 +1394,34 @@ class DeveloperTab(QWidget):
         if hasattr(self, 'canvas'):
             self.canvas.is_zoomed = False
 
-        # 4. Desbloquear señales
         for w in widgets_to_block:
             w.blockSignals(False)
             
     def clear_session(self):
-        """
-        Descarga por completo la sesión del revelador:
-        vacía buffers de 32 bits, proxies, máscaras, canvas y fuerza gc.collect().
-        """
-        # 1. Resetear todos los sliders y variables de parámetros
+        """Descarga por completo la sesión del revelador y fuerza recolección de memoria."""
         self.reset_all_parameters()
 
-        # 2. Desvincular y liberar buffers pesados de imagen nativa
         self.image_32bit = None
         self.image_starless = None
         self.image_stars = None
 
-        # 3. Desvincular y liberar proxies acelerados
         self.preview_proxy = None
         self.proxy_starless = None
         self.proxy_stars = None
         self.proxy_mask = None
 
-        # 4. Estado de proyecto y máscaras
         self.current_mask = None
         self.active_filepath = None
 
-        # 5. Deshabilitar controles dependientes de StarNet y procesado
         self.combo_layer.setEnabled(False)
         self.slider_stars.setEnabled(False)
         self.slider_contrast_starless.setEnabled(False)
         self.slider_clarity.setEnabled(False)
         self.slider_dehaze.setEnabled(False)
-        #self.combo_denoise.setEnabled(False)
         self.slider_denoise.setEnabled(False)
         self.slider_ond_est.setEnabled(False)
         self.slider_ond_bg.setEnabled(False)
 
-        # 6. Limpiar lienzo interactivo
         if hasattr(self, 'canvas') and self.canvas is not None:
             self.canvas.orig_rgb = None
             self.canvas.base_pixmap = None
@@ -1496,8 +1432,5 @@ class DeveloperTab(QWidget):
                 self.canvas.refined_overlay = None
             self.canvas.update()
 
-        # 7. Limpiar registro de logs
         self.txt_log.clear()
-
-        # 8. Recolección forzada de memoria RAM
         gc.collect()
