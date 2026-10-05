@@ -337,14 +337,14 @@ def align_single_light_task(args: tuple) -> dict:
         else:
             clean_sky_frame = calibrated_frame
 
+        # Rellenar con NaN fuera de los límites de la toma para no sesgar el apilado periférico
         warped = cv2.warpPerspective(
             clean_sky_frame, H_matrix, (w, h),
             flags=cv2.INTER_CUBIC,
             borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0)
+            borderValue=(np.nan, np.nan, np.nan)
         )
         del clean_sky_frame
-        
         del calibrated_frame
 
         warped_processed = preprocess_subframe_lp(
@@ -386,7 +386,9 @@ def align_single_light_task(args: tuple) -> dict:
 
 def _process_single_chunk(args):
     """
-    Procesa un bloque de filas en CPU. Soporta origen en disco (.bin) o RAM (np.ndarray).
+    Procesa un bloque de filas en CPU idéntico al algoritmo de GPU.
+    Utiliza nanmedian y nanmean para garantizar que los bordes con menos tomas
+    no sufran degradación tonal ni pérdida de contraste.
     """
     frames_source, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
     actual_rows = y_end - y_start
@@ -415,39 +417,41 @@ def _process_single_chunk(args):
         target_p = max(5.0, 50.0 - (lp_strength * 40.0))
         for ch in range(c):
             channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-            res = np.percentile(channel_data, target_p, axis=0)
-            chunk_result[:, :, ch] = res.reshape((actual_rows, w))
+            res = np.nanpercentile(channel_data, target_p, axis=0)
+            chunk_result[:, :, ch] = np.nan_to_num(res, nan=0.0).reshape((actual_rows, w))
         del sub_stack
         return y_start, y_end, chunk_result
 
-    # Apilado estándar por Kappa-Sigma Clipping
+    # Apilado por Kappa-Sigma Clipping con protección contra bordes y NaNs
     upper_tol = kappa + 0.8
     for ch in range(c):
         channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-        
-        med = np.median(channel_data, axis=0)
+
+        # Mediana ignorando los bordes vacíos fuera de campo
+        med = np.nanmedian(channel_data, axis=0)
         abs_diff = np.abs(channel_data - med)
-        mad = np.median(abs_diff, axis=0)
+        mad = np.nanmedian(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
-        # Rechazo asimétrico:
-        # - Límite superior holgado (+3.0) para preservar nebulosas y estrellas tenues
-        # - Límite inferior muy estricto (-0.6 a -0.8) para purgar de inmediato cualquier
-        #   sombra de ramas u obstáculos que hayan rotado sobre el cielo
-        low = med - 0.4 * sigma
+        # Umbrales de rechazo
+        low = med - 0.5 * sigma
         high = med + upper_tol * sigma
 
         valid = (channel_data >= low) & (channel_data <= high)
         
-        counts = np.sum(valid, axis=0)
-        sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
+        # Filtramos píxeles descartados asignándoles NaN
+        filtered = np.where(valid, channel_data, np.nan)
         
-        fallback = counts == 0
-        counts[fallback] = 1
-        res = sums / counts
-        res[fallback] = med[fallback]
+        # Media aritmética ignorando descartes y bordes fuera de encuadre
+        with np.errstate(divide='ignore', invalid='ignore'):
+            res = np.nanmean(filtered, axis=0)
+            
+            # Si en algún píxel todas las tomas fueron descartadas, recuperar la mediana
+            nan_mask = np.isnan(res)
+            if np.any(nan_mask):
+                res[nan_mask] = med[nan_mask]
 
-        chunk_result[:, :, ch] = res.reshape((actual_rows, w))
+        chunk_result[:, :, ch] = np.nan_to_num(res, nan=0.0).reshape((actual_rows, w))
 
     del sub_stack
     return y_start, y_end, chunk_result

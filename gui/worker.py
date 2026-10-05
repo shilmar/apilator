@@ -343,103 +343,91 @@ class StackingWorker(QThread):
             self.status_changed.emit(f"-> Apilado de cielo completado en {dt_stack_sky:.1f}s.")
             self.progress_changed.emit(sky_target_pct)
 
-            final_composite = sky_stacked
+            # ============================================================
+            # OBTENCIÓN DE LA CAPA DE SUELO (Una sola vez según el modo)
+            # ============================================================
+            ground_layer = None
 
-            # Suelo: 78% -> 95%
-            if has_ground:
+            if has_ground and sky_mask is not None:
                 if self._is_cancelled:
-                    del final_composite
+                    del sky_stacked
                     self.cancelled.emit()
                     return
 
-                self.status_changed.emit(f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
-                self.progress_changed.emit(80)
+                # MODO 1: Apilar ráfaga de suelo completa (Dual)
+                if ground_mode == "dual" and len(ground_frames_collection) >= 2:
+                    self.status_changed.emit(
+                        f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})..."
+                    )
+                    self.progress_changed.emit(80)
 
-                t0_stack_gnd = time.perf_counter()
-                ground_stacked = stream_stack_auto(
-                    ground_frames_collection, 
-                    (h, w, c), 
-                    chunk_rows=800, 
-                    kappa=kappa,
-                    use_gpu=use_gpu
-                )
+                    t0_stack_gnd = time.perf_counter()
+                    ground_layer = stream_stack_auto(
+                        ground_frames_collection, 
+                        (h, w, c), 
+                        chunk_rows=800, 
+                        kappa=kappa,
+                        use_gpu=use_gpu
+                    )
+                    
+                    if self._is_cancelled:
+                        del sky_stacked, ground_layer
+                        self.cancelled.emit()
+                        return
 
-                if self._is_cancelled:
-                    del ground_stacked, final_composite
-                    self.cancelled.emit()
-                    return
+                    dt_stack_gnd = time.perf_counter() - t0_stack_gnd
+                    self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
 
-                dt_stack_gnd = time.perf_counter() - t0_stack_gnd
-                self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
+                # MODO 2: Suelo de la imagen de referencia (sin promediar)
+                elif ground_mode == "reference" and ref_raw_ground is not None:
+                    self.status_changed.emit("[Fase 3/4] Usando suelo de la toma de referencia (sin promediar)...")
+                    ground_layer = ref_raw_ground
+
+                # MODO 3: Suelo externo asignado desde la pestaña Suelo
+                elif ground_mode == "external" and external_ground_path:
+                    self.status_changed.emit(f"[Fase 3/4] Cargando suelo externo: {os.path.basename(external_ground_path)}...")
+                    ext_img = load_image_as_float32(external_ground_path)
+                    if ext_img.shape[:2] != (h, w):
+                        ext_img = cv2.resize(ext_img, (w, h), interpolation=cv2.INTER_LINEAR)
+                    ground_layer = ext_img
+
                 self.progress_changed.emit(95)
 
-                # Obtención de la capa de suelo según el modo
-                ground_layer = None
-
-                if sky_mask is not None and mode == "fixed_tripod":
-                    if ground_mode == "dual" and len(ground_frames_collection) >= 2:
-                        if self._is_cancelled:
-                            del sky_stacked
-                            self.cancelled.emit()
-                            return
-
-                        self.status_changed.emit(f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})...")
-                        self.progress_changed.emit(80)
-
-                        t0_stack_gnd = time.perf_counter()
-                        ground_layer = stream_stack_auto(
-                            ground_frames_collection, 
-                            (h, w, c), 
-                            chunk_rows=800, 
-                            kappa=kappa,
-                            use_gpu=use_gpu
-                        )
-                        dt_stack_gnd = time.perf_counter() - t0_stack_gnd
-                        self.status_changed.emit(f"-> Apilado de suelo completado en {dt_stack_gnd:.1f}s.")
-                    
-                    elif ground_mode == "reference" and ref_raw_ground is not None:
-                        self.status_changed.emit("[Fase 3/4] Usando suelo de la toma de referencia (sin promediar)...")
-                        ground_layer = ref_raw_ground
-
-                    elif ground_mode == "external" and external_ground_path:
-                        self.status_changed.emit(f"[Fase 3/4] Cargando suelo externo: {os.path.basename(external_ground_path)}...")
-                        ext_img = load_image_as_float32(external_ground_path)
-                        if ext_img.shape[:2] != (h, w):
-                            ext_img = cv2.resize(ext_img, (w, h), interpolation=cv2.INTER_LINEAR)
-                        ground_layer = ext_img
-
-                    self.progress_changed.emit(95)
-
-                # ============================================================
-                # FASE 4/4: COMPOSICIÓN Y GUARDADO
-                # ============================================================
-                if ground_layer is not None:
-                    t0_comp = time.perf_counter()
-                    self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
-                    self.progress_changed.emit(96)
-
-                    raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
-                    smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
-                    mask_3d = smooth_mask[..., np.newaxis] if smooth_mask.ndim == 2 else smooth_mask
-
-                    base_composite = (sky_stacked * mask_3d) + (ground_layer * (1.0 - mask_3d))
-
-                    transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
-                    final_composite = np.where(
-                        transition_zone & (ground_layer < base_composite),
-                        ground_layer * (1.0 - mask_3d * 0.5) + base_composite * (mask_3d * 0.5),
-                        base_composite
-                    )
-
-                    del ground_layer, mask_3d, smooth_mask, base_composite
-                    dt_comp = time.perf_counter() - t0_comp
-                    self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
-                else:
-                    final_composite = sky_stacked
-                    self.status_changed.emit("[Fase 4/4] Sin capa de suelo. Saltando composición de máscara.")
-
-            if final_composite is not sky_stacked:
+            # ============================================================
+            # FASE 4/4: COMPOSICIÓN Y GUARDADO
+            # ============================================================
+            if self._is_cancelled:
                 del sky_stacked
+                if ground_layer is not None:
+                    del ground_layer
+                self.cancelled.emit()
+                return
+
+            # Composición de cielo y suelo (si procede)
+            if has_ground and sky_mask is not None and ground_layer is not None:
+                t0_comp = time.perf_counter()
+                self.status_changed.emit("[Fase 4/4] Componiendo imagen final de 32 bits sin discontinuidades...")
+                self.progress_changed.emit(96)
+
+                raw_mask = np.clip(sky_mask.astype(np.float32), 0.0, 1.0)
+                smooth_mask = cv2.GaussianBlur(raw_mask, (5, 5), sigmaX=0.8)
+                mask_3d = smooth_mask[..., np.newaxis] if smooth_mask.ndim == 2 else smooth_mask
+
+                base_composite = (sky_stacked * mask_3d) + (ground_layer * (1.0 - mask_3d))
+
+                transition_zone = (mask_3d > 0.02) & (mask_3d < 0.90)
+                final_composite = np.where(
+                    transition_zone & (ground_layer < base_composite),
+                    ground_layer * (1.0 - mask_3d * 0.5) + base_composite * (mask_3d * 0.5),
+                    base_composite
+                )
+
+                del ground_layer, mask_3d, smooth_mask, base_composite, sky_stacked
+                dt_comp = time.perf_counter() - t0_comp
+                self.status_changed.emit(f"-> Composición completada en {dt_comp:.2f}s.")
+            else:
+                final_composite = sky_stacked
+                self.status_changed.emit("[Fase 4/4] Sin capa de suelo adicional. Saltando composición de máscara.")
 
             if self._is_cancelled:
                 del final_composite
