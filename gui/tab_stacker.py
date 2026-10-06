@@ -665,7 +665,7 @@ class StackerTab(QWidget):
             self.log_message(
                 f"[PROYECTO] Cargada: {len(self.lights_list)} Lights, "
                 f"{len(self.darks_list)} Darks, {len(self.flats_list)} Flats, "
-                f"{len(self.ground_list)} Suelo."
+                f"{len(self.bias_list)} Bias, {len(self.ground_list)} Suelo."
             )
 
         except Exception as e:
@@ -789,6 +789,7 @@ class StackerTab(QWidget):
             "darks": self.darks_list,
             "flats": self.flats_list,
             "mask": self.computed_mask,
+            "bias": self.bias_list,
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
             "ground_mode": selected_ground_mode,
             "external_ground_path": external_path,

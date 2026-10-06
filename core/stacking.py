@@ -591,3 +591,30 @@ def stream_stack_auto(
         lp_method=lp_method,
         lp_strength=lp_strength
     )
+    
+def get_image_dimensions(filepath: str) -> tuple[int, int]:
+    """
+    Obtiene (alto, ancho) de forma rápida. Para RAW lee los metadatos
+    respetando la orientación de usuario sin procesar la matriz completa.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ['.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw']:
+        import rawpy
+        with rawpy.imread(filepath) as raw:
+            # Obtener dimensiones efectivas teniendo en cuenta user_flip si aplica
+            # o haciendo un postprocess mínimo/rápido de 1/16 si fuera necesario:
+            h, w = raw.sizes.height, raw.sizes.width
+            # Si rawpy rota según EXIF, los flips 5, 6, 7, 8 transponen dimensiones
+            if raw.sizes.flip in [5, 6, 7, 8]:
+                return w, h
+            return h, w
+    else:
+        import cv2
+        # Carga rápida solo de cabeceras en formatos estándar
+        info = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
+        if info is not None:
+            return info.shape[0], info.shape[1]
+    
+    # Fallback si no se puede leer por cabecera
+    img = load_image_as_float32(filepath)
+    return img.shape[0], img.shape[1]

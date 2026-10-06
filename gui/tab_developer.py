@@ -161,12 +161,14 @@ class DeveloperTab(QWidget):
         layout_lp.addWidget(self.slider_lp)
         left_layout.addWidget(grp_lp)
 
-        # --- StarNet++ AI Control de Estrellas ---
-        grp_starnet = QGroupBox("StarNet++ AI - Control de Estrellas")
+        # --- SUITE STARNET++ AI Y PROCESADO DE CAPAS ---
+        grp_starnet = QGroupBox("StarNet++ AI — Desacoplo y Procesado de Capas")
         layout_starnet = QVBoxLayout(grp_starnet)
+        layout_starnet.setSpacing(6)
 
+        # 1. Disparador de Ejecución
         row_sn = QHBoxLayout()
-        row_sn.addWidget(QLabel("Paso:"))
+        row_sn.addWidget(QLabel("Paso (Stride):"))
         self.spin_stride = QSpinBox()
         self.spin_stride.setRange(64, 512)
         self.spin_stride.setSingleStep(64)
@@ -174,123 +176,123 @@ class DeveloperTab(QWidget):
         row_sn.addWidget(self.spin_stride)
 
         self.btn_starnet = QPushButton("Separar Estrellas con StarNet")
+        self.btn_starnet.setStyleSheet("font-weight: bold;")
         self.btn_starnet.clicked.connect(self.run_starnet)
         row_sn.addWidget(self.btn_starnet)
         layout_starnet.addLayout(row_sn)
 
+        # 2. Contenedor de herramientas dependientes (desactivado por defecto)
+        self.container_starnet_tools = QWidget()
+        tools_layout = QVBoxLayout(self.container_starnet_tools)
+        tools_layout.setContentsMargins(0, 4, 0, 0)
+        tools_layout.setSpacing(6)
+
+        # Separador visual
+        sep_sn = QFrame()
+        sep_sn.setFrameShape(QFrame.HLine)
+        sep_sn.setFrameShadow(QFrame.Sunken)
+        tools_layout.addWidget(sep_sn)
+
+        # Capas y Estrellas
         row_view = QHBoxLayout()
         row_view.addWidget(QLabel("Capa visible:"))
         self.combo_layer = QComboBox()
         self.combo_layer.addItems(["Compuesta (Normal)", "Solo Fondo (Starless)", "Solo Estrellas"])
-        self.combo_layer.setEnabled(False)
         self.combo_layer.currentIndexChanged.connect(self.on_layer_mode_changed)
         row_view.addWidget(self.combo_layer)
-        layout_starnet.addLayout(row_view)
+        tools_layout.addLayout(row_view)
 
         row_stars = QHBoxLayout()
         row_stars.addWidget(QLabel("Intensidad Estrellas:"))
         self.lbl_stars = QLabel("100%")
         row_stars.addWidget(self.lbl_stars)
-        layout_starnet.addLayout(row_stars)
+        tools_layout.addLayout(row_stars)
 
         self.slider_stars = QSlider(Qt.Horizontal)
         self.slider_stars.setRange(0, 200)
         self.slider_stars.setValue(100)
-        self.slider_stars.setEnabled(False)
         self.slider_stars.valueChanged.connect(self.on_stars_slider_changed)
-        layout_starnet.addWidget(self.slider_stars)
+        tools_layout.addWidget(self.slider_stars)
 
+        # Fondo: Contraste, Claridad y Neblina
         row_cs = QHBoxLayout()
         row_cs.addWidget(QLabel("Contraste Fondo (Starless):"))
         self.lbl_contrast_starless = QLabel("0.00")
         row_cs.addWidget(self.lbl_contrast_starless)
-        layout_starnet.addLayout(row_cs)
+        tools_layout.addLayout(row_cs)
 
         self.slider_contrast_starless = QSlider(Qt.Horizontal)
         self.slider_contrast_starless.setRange(-100, 100)
         self.slider_contrast_starless.setValue(0)
-        self.slider_contrast_starless.setEnabled(False)
         self.slider_contrast_starless.valueChanged.connect(self.on_contrast_starless_changed)
-        layout_starnet.addWidget(self.slider_contrast_starless)
+        tools_layout.addWidget(self.slider_contrast_starless)
 
         row_clarity = QHBoxLayout()
         row_clarity.addWidget(QLabel("Claridad Fondo:"))
         self.lbl_clarity = QLabel("0.00")
         row_clarity.addWidget(self.lbl_clarity)
-        layout_starnet.addLayout(row_clarity)
+        tools_layout.addLayout(row_clarity)
 
         self.slider_clarity = QSlider(Qt.Horizontal)
         self.slider_clarity.setRange(-200, 200)
         self.slider_clarity.setValue(0)
-        self.slider_clarity.setEnabled(False)
         self.slider_clarity.valueChanged.connect(self.on_clarity_changed)
-        layout_starnet.addWidget(self.slider_clarity)
+        tools_layout.addWidget(self.slider_clarity)
 
         row_dehaze = QHBoxLayout()
         row_dehaze.addWidget(QLabel("Borrar Neblina:"))
         self.lbl_dehaze = QLabel("0.00")
         row_dehaze.addWidget(self.lbl_dehaze)
-        layout_starnet.addLayout(row_dehaze)
+        tools_layout.addLayout(row_dehaze)
 
         self.slider_dehaze = QSlider(Qt.Horizontal)
         self.slider_dehaze.setRange(-200, 200)
         self.slider_dehaze.setValue(0)
-        self.slider_dehaze.setEnabled(False)
         self.slider_dehaze.valueChanged.connect(self.on_dehaze_changed)
-        layout_starnet.addWidget(self.slider_dehaze)
+        tools_layout.addWidget(self.slider_dehaze)
 
-        left_layout.addWidget(grp_starnet)
-        
-        # --- Realce Multiescala por Ondículas ---
-        grp_ondiculas = QGroupBox("Estructura Multiescala (Ondículas)")
-        layout_ondiculas = QVBoxLayout(grp_ondiculas)
-
+        # Ondículas
         row_ond_est = QHBoxLayout()
-        row_ond_est.addWidget(QLabel("Estructura Galáctica:"))
+        row_ond_est.addWidget(QLabel("Estructura Galáctica (Ondículas):"))
         self.lbl_ond_est = QLabel("0.00")
         row_ond_est.addWidget(self.lbl_ond_est)
-        layout_ondiculas.addLayout(row_ond_est)
+        tools_layout.addLayout(row_ond_est)
 
         self.slider_ond_est = QSlider(Qt.Horizontal)
         self.slider_ond_est.setRange(-100, 100)
         self.slider_ond_est.setValue(0)
-        self.slider_ond_est.setEnabled(False)
         self.slider_ond_est.valueChanged.connect(self.on_ond_estructura_changed)
-        layout_ondiculas.addWidget(self.slider_ond_est)
+        tools_layout.addWidget(self.slider_ond_est)
 
         row_ond_bg = QHBoxLayout()
         row_ond_bg.addWidget(QLabel("Atenuar Fondo Residual:"))
         self.lbl_ond_bg = QLabel("0%")
         row_ond_bg.addWidget(self.lbl_ond_bg)
-        layout_ondiculas.addLayout(row_ond_bg)
+        tools_layout.addLayout(row_ond_bg)
 
         self.slider_ond_bg = QSlider(Qt.Horizontal)
         self.slider_ond_bg.setRange(0, 100)
         self.slider_ond_bg.setValue(0)
-        self.slider_ond_bg.setEnabled(False)
         self.slider_ond_bg.valueChanged.connect(self.on_ond_fondo_changed)
-        layout_ondiculas.addWidget(self.slider_ond_bg)
+        tools_layout.addWidget(self.slider_ond_bg)
 
-        left_layout.addWidget(grp_ondiculas)
-        
-        # --- Reducción de Ruido (Fondo) ---
-        grp_dn = QGroupBox("Reducción de Ruido (Fondo)")
-        layout_dn = QVBoxLayout(grp_dn)
-
+        # Reducción de Ruido
         row_dn = QHBoxLayout()
-        row_dn.addWidget(QLabel("Fuerza Denoise:"))
+        row_dn.addWidget(QLabel("Reducción de Ruido (Fondo):"))
         self.lbl_denoise = QLabel("0%")
         row_dn.addWidget(self.lbl_denoise)
-        layout_dn.addLayout(row_dn)
-        
+        tools_layout.addLayout(row_dn)
+
         self.slider_denoise = QSlider(Qt.Horizontal)
         self.slider_denoise.setRange(0, 100)
         self.slider_denoise.setValue(0)
-        self.slider_denoise.setEnabled(False)
         self.slider_denoise.valueChanged.connect(self.on_denoise_changed)
-        layout_dn.addWidget(self.slider_denoise)
+        tools_layout.addWidget(self.slider_denoise)
 
-        left_layout.addWidget(grp_dn)
+        # Integrar contenedor e inicializar apagado
+        layout_starnet.addWidget(self.container_starnet_tools)
+        left_layout.addWidget(grp_starnet)
+        self._set_starnet_tools_enabled(False)
         
         # --- Curvas de Tono con Histograma ---
         grp_curves = QGroupBox("Curvas de Tono (Fondo e Histograma)")
@@ -902,15 +904,7 @@ class DeveloperTab(QWidget):
         self.image_starless = np.ascontiguousarray(starless_img, dtype=np.float32)
         self.image_stars = np.ascontiguousarray(stars_img, dtype=np.float32)
 
-        self.combo_layer.setEnabled(True)
-        self.slider_stars.setEnabled(True)
-        self.slider_contrast_starless.setEnabled(True) 
-        self.slider_clarity.setEnabled(True)
-        self.slider_dehaze.setEnabled(True)
-        self.slider_denoise.setEnabled(True)
-        self.slider_ond_est.setEnabled(True)
-        self.slider_ond_bg.setEnabled(True)
-
+        self._set_starnet_tools_enabled(True)
         self._generate_preview_proxy()
         self.update_stretch_preview()
         self.log_message("[STARNET] Estrellas separadas y purgadas con máscara de cielo. Capas activadas.")
@@ -1105,19 +1099,10 @@ class DeveloperTab(QWidget):
         self.combo_layer.setEnabled(False)
         self.slider_stars.setEnabled(False)
         
+        self._set_starnet_tools_enabled(False)
         self._generate_preview_proxy()
         self.update_stretch_preview()
         
-        self.slider_contrast_starless.setEnabled(False)
-        self.slider_contrast_starless.setValue(0)
-        self.contrast_starless_val = 0.0
-        self.lbl_contrast_starless.setText("0.00")
-        self.slider_denoise.setEnabled(False)
-        self.slider_denoise.setValue(0)
-        self.denoise_strength = 0.0
-        self.slider_ond_est.setEnabled(False)
-        self.slider_ond_bg.setEnabled(False)
-
     def on_bg_extraction_error(self, err_msg: str):
         self._set_ai_processing_state(False)
         self.log_message(f"[ERROR GRAXPERT] {err_msg}")
@@ -1335,35 +1320,29 @@ class DeveloperTab(QWidget):
         self.lbl_lp.setText("0%")
 
         self.combo_layer.setCurrentIndex(0)
-        self.combo_layer.setEnabled(False)
 
         self.slider_stars.setValue(100)
         self.lbl_stars.setText("100%")
-        self.slider_stars.setEnabled(False)
 
         self.slider_contrast_starless.setValue(0)
         self.lbl_contrast_starless.setText("0.00")
-        self.slider_contrast_starless.setEnabled(False)
 
         self.slider_clarity.setValue(0)
         self.lbl_clarity.setText("0.00")
-        self.slider_clarity.setEnabled(False)
 
         self.slider_dehaze.setValue(0)
         self.lbl_dehaze.setText("0.00")
-        self.slider_dehaze.setEnabled(False)
 
         self.slider_ond_est.setValue(0)
         self.lbl_ond_est.setText("0.00")
-        self.slider_ond_est.setEnabled(False)
 
         self.slider_ond_bg.setValue(0)
         self.lbl_ond_bg.setText("0%")
-        self.slider_ond_bg.setEnabled(False)
 
         self.slider_denoise.setValue(0)
         self.lbl_denoise.setText("0%")
-        self.slider_denoise.setEnabled(False)
+        
+        self._set_starnet_tools_enabled(False)
 
         if hasattr(self, 'curve_widget'):
             self.curve_widget.reset_curve()
@@ -1420,14 +1399,7 @@ class DeveloperTab(QWidget):
         self.current_mask = None
         self.active_filepath = None
 
-        self.combo_layer.setEnabled(False)
-        self.slider_stars.setEnabled(False)
-        self.slider_contrast_starless.setEnabled(False)
-        self.slider_clarity.setEnabled(False)
-        self.slider_dehaze.setEnabled(False)
-        self.slider_denoise.setEnabled(False)
-        self.slider_ond_est.setEnabled(False)
-        self.slider_ond_bg.setEnabled(False)
+        self._set_starnet_tools_enabled(False)
 
         if hasattr(self, 'canvas') and self.canvas is not None:
             self.canvas.orig_rgb = None
@@ -1441,3 +1413,23 @@ class DeveloperTab(QWidget):
 
         self.txt_log.clear()
         gc.collect()
+        
+    def _set_starnet_tools_enabled(self, enabled: bool):
+        """Habilita o deshabilita individualmente todos los controles que dependen de StarNet."""
+        if hasattr(self, "container_starnet_tools"):
+            self.container_starnet_tools.setEnabled(enabled)
+
+        # Activación forzada de cada control hijo
+        controls = [
+            getattr(self, "combo_layer", None),
+            getattr(self, "slider_stars", None),
+            getattr(self, "slider_contrast_starless", None),
+            getattr(self, "slider_clarity", None),
+            getattr(self, "slider_dehaze", None),
+            getattr(self, "slider_ond_est", None),
+            getattr(self, "slider_ond_bg", None),
+            getattr(self, "slider_denoise", None),
+        ]
+        for ctrl in controls:
+            if ctrl is not None:
+                ctrl.setEnabled(enabled)

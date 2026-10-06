@@ -19,6 +19,7 @@ from PySide6.QtCore import QThread, Signal
 from core.config_manager import load_config
 from core.stacking import (
     load_image_as_float32, 
+    get_image_dimensions,
     detect_sky_stars, 
     refine_star_centroids,
     stream_stack_auto,
@@ -144,6 +145,46 @@ class StackingWorker(QThread):
             self.progress_changed.emit(1)
 
             temp_dir = tempfile.mkdtemp(prefix="astro_gui_")
+
+            # ------------------------------------------------------------
+            # VALIDACIÓN PREVENTIVA DE GEOMETRÍA Y ORIENTACIÓN
+            # ------------------------------------------------------------
+            ref_path = lights[0]
+            ref_h, ref_w = get_image_dimensions(ref_path)
+
+            checks = [
+                ("Darks", darks),
+                ("Flats", flats),
+                ("Bias", bias),
+            ]
+
+            for group_name, file_list in checks:
+                if not file_list:
+                    continue
+                sample_file = file_list[0]
+                sample_h, sample_w = get_image_dimensions(sample_file)
+
+                if (sample_h, sample_w) != (ref_h, ref_w):
+                    # Comprobar si es un problema de orientación traspuesta
+                    if (sample_h, sample_w) == (ref_w, ref_h):
+                        err_msg = (
+                            f"Discrepancia de orientación en {group_name}:\n\n"
+                            f"• Las tomas Light están en {'Vertical' if ref_h > ref_w else 'Horizontal'} ({ref_w}x{ref_h} px).\n"
+                            f"• Las tomas {group_name} ({os.path.basename(sample_file)}) están en "
+                            f"{'Horizontal' if ref_h > ref_w else 'Vertical'} ({sample_w}x{sample_h} px).\n\n"
+                            f"Carga tomas de {group_name} disparadas con la misma orientación de la cámara."
+                        )
+                    else:
+                        err_msg = (
+                            f"Incompatibilidad de resolución en {group_name}:\n\n"
+                            f"• Referencia Light: {ref_w}x{ref_h} px\n"
+                            f"• {group_name} ({os.path.basename(sample_file)}): {sample_w}x{sample_h} px\n\n"
+                            f"Los archivos de calibración deben corresponder al mismo sensor y recorte."
+                        )
+
+                    self.status_changed.emit(f"[ERROR CONFIGURACIÓN] {err_msg}")
+                    self.error_occurred.emit(err_msg)
+                    return
 
             # ============================================================
             # FASE 1/4: CALIBRACIÓN (BIAS, DARKS, FLATS) (2% -> 10%)
