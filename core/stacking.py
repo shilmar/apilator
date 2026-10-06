@@ -58,6 +58,30 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
             raise ValueError(f"No se pudo leer el archivo: {filepath}")
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
+def create_master_bias(bias_paths: list) -> np.ndarray:
+    """
+    Genera el Master Bias calculando la mediana de los cuadros de lectura rápida.
+    """
+    if not bias_paths:
+        return None
+
+    loaded_bias = []
+    for path in bias_paths:
+        img = load_image_as_float32(path)
+        loaded_bias.append(img)
+
+    if len(loaded_bias) == 1:
+        return loaded_bias[0]
+
+    stack = np.stack(loaded_bias, axis=0)
+    del loaded_bias
+    gc.collect()
+
+    master_bias = np.median(stack, axis=0).astype(np.float32)
+    del stack
+    gc.collect()
+
+    return master_bias
 
 def create_master_dark(dark_paths: list) -> np.ndarray:
     if not dark_paths:
@@ -72,29 +96,22 @@ def create_master_dark(dark_paths: list) -> np.ndarray:
         return loaded_darks[0]
 
     stack = np.stack(loaded_darks, axis=0)
-    del loaded_darks
-    gc.collect()
-
-    master_dark = np.median(stack, axis=0).astype(np.float32)
-    del stack
-    gc.collect()
-
-    return master_dark
-
-def create_master_flat(flat_paths: list, master_dark: np.ndarray = None) -> np.ndarray:
+def create_master_flat(flat_paths: list, master_dark: np.ndarray = None, master_bias: np.ndarray = None) -> np.ndarray:
     """
-    Genera el Master Flat calculando la mediana de los cuadros planos (Flat frames)
-    y normalizándolo respecto a su media o mediana por canal para que actúe
-    como multiplicador de ganancia unitaria (~1.0).
+    Genera el Master Flat restando el pedestal electrónico (Bias o Dark)
+    y normalizando por canal a ganancia unitaria (~1.0).
     """
     if not flat_paths:
         return None
 
+    # Resta preferente: si hay Bias se resta el bias; si no, el dark
+    pedestal = master_bias if master_bias is not None else master_dark
+
     loaded_flats = []
     for path in flat_paths:
         img = load_image_as_float32(path)
-        if master_dark is not None:
-            img = np.maximum(0.0, img - master_dark)
+        if pedestal is not None:
+            img = np.maximum(0.0, img - pedestal)
         loaded_flats.append(img)
 
     if len(loaded_flats) == 1:
@@ -107,7 +124,6 @@ def create_master_flat(flat_paths: list, master_dark: np.ndarray = None) -> np.n
     del loaded_flats
     gc.collect()
 
-    # Normalización canal a canal para preservar el balance de blancos (WB) original
     master_flat = np.empty_like(raw_flat)
     for ch in range(raw_flat.shape[2]):
         channel_data = raw_flat[:, :, ch]
@@ -122,16 +138,17 @@ def create_master_flat(flat_paths: list, master_dark: np.ndarray = None) -> np.n
 def calibrate_light(
     light_img: np.ndarray, 
     master_dark: np.ndarray = None, 
-    master_flat: np.ndarray = None
+    master_flat: np.ndarray = None,
+    master_bias: np.ndarray = None
 ) -> np.ndarray:
-    """
-    Calibra un cuadro de luz restando el Master Dark (si existe) y
-    dividiendo por el Master Flat normalizado (si existe).
-    """
-    calibrated = light_img if master_dark is None else np.maximum(0.0, light_img - master_dark)
+    if master_dark is not None:
+        calibrated = np.maximum(0.0, light_img - master_dark)
+    elif master_bias is not None:
+        calibrated = np.maximum(0.0, light_img - master_bias)
+    else:
+        calibrated = light_img
 
     if master_flat is not None:
-        # División segura protegiendo contra ceros o valores extremadamente bajos
         safe_flat = np.where(master_flat > 1e-4, master_flat, 1.0)
         calibrated = np.clip(calibrated / safe_flat, 0.0, 1.0)
 
@@ -249,7 +266,7 @@ def save_frame_float32(filepath: str, img_float32: np.ndarray):
 
 def align_single_light_task(args: tuple) -> dict:
     (
-        idx, path, total_lights, temp_dir, mode, master_dark, master_flat,
+        idx, path, total_lights, temp_dir, mode, master_dark, master_flat, master_bias,
         ref_kps_pts, ref_desc, norm_type, ref_gray,
         w, h, sky_mask, lp_method, lp_strength, ref_stats,
         use_ram_buffer
@@ -270,7 +287,12 @@ def align_single_light_task(args: tuple) -> dict:
 
     try:
         raw_frame = load_image_as_float32(path)
-        calibrated_frame = calibrate_light(raw_frame, master_dark=master_dark, master_flat=master_flat)
+        calibrated_frame = calibrate_light(
+            raw_frame, 
+            master_dark=master_dark, 
+            master_flat=master_flat, 
+            master_bias=master_bias
+        )
 
         curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
         if curr_desc is None or len(curr_kp) < 15:

@@ -4,70 +4,65 @@
 
 ---
 
-## Release v0.5.5 - Flujos Flexibles de Suelo y Auditoría del Motor
-
-### Novedades y Mejoras Clave:
-**Gestión Flexible del Suelo en el Apilado:**
-  * Nueva pestaña dedicada **"Suelo"** integrada de forma unificada junto a *Lights* y *Darks*.
-  * Selector de tratamiento de suelo:
-    * *Apilar Suelo Completo (Dual)*: Integración estándar de cielo y tierra.
-    * *Suelo de Referencia (Sin apilar)*: Usa la toma de referencia para la zona terrestre, evitando emborronamiento en noches ventosas y acelerando el cálculo.
-    * *Usar Toma de Pestaña Suelo*: Permite asignar tomas dedicadas de suelo (hora azul, baja sensibilidad ISO o exposiciones prolongadas).
-**Persistencia Ampliada en Sesiones (.mwstack):**
-  * Soporte para guardar y restaurar rutas relativas de tomas de suelo, máscaras de 16 bits y configuración de integración.
-**Auditoría de Rendimiento y Código:**
-  * **Lienzo y Curvas (`MaskCanvas` y `CurveWidget`):** Submuestreo rápido para el cálculo instantáneo de percentiles e histogramas logarítmicos sin congelar la interfaz; protección estricta contra cruces de nodos en PCHIP y soporte completo para eventos nativos de Qt6.
-  * **Ajustes y GPU (`SettingsTab` y `gpu_backend`):** Eliminación de lecturas duplicadas de configuración y optimización del módulo matemático condicional.
-  * **Puentes CLI (`StarNet` y `GraXpert`):** Operaciones vectoriales continuas y saneamiento de llamadas de subprocesos.
----
-
 ## Características Principales
 
-### 1. Apilado Diferencial Cielo / Suelo
-- **Alineación Estelar Robusta:** Detección y emparejamiento de estrellas mediante transformaciones afines y descriptores clave sobre datos en coma flotante de 32 bits.
-- **Apilado de Ruido Mínimo:** Integración selectiva para el cielo (alineado) y el suelo (estático).
-- **Rechazo Estadístico Min-Sigma:** Eliminación eficaz de trazas de satélites, estelas de aviones y artefactos transitorios sin degradar la relación señal/ruido (SNR).
-- **Antipolución Lumínica:** Corrección de gradientes y cúpulas de luz artificial inspirada en algoritmos de tipo Sequator.
+### 1. Calibración Astronómica Rigurosa
+- **Pipeline Completo de Calibración:** Pestañas dedicadas y soporte nativo para **Lights**, **Darks**, **Flats** y **Bias**.
+- **Sustracción de Pedestal Electrónico y Térmico:** Eliminación del ruido térmico y píxeles calientes mediante Master Dark, y del ruido de lectura/offset mediante Master Bias.
+- **Aplanado de Campo y Viñeteo (Master Flat):** Corrección lineal de sombras de motas de polvo y caída de luz periférica del tren óptico, con normalización independiente por canal para preservar el balance de color.
+- **Persistencia de Proyecto (.mwstack):** Guardado y restauración completa del estado de la sesión (listas de archivos de calibración, parámetros de integración y máscaras calculadas).
 
-### 2. Segmentación y Máscaras Interactivas
-- **GrabCut Guiado Multiescala:** Delineación precisa del horizonte y perfiles complejos (árboles, relieve montañoso, estructuras).
+### 2. Apilado Diferencial Cielo / Suelo
+- **Alineación Estelar Robusta:** Detección de estrellas y emparejamiento homográfico/afín de precisión subpíxel sobre datos lineales de 32 bits.
+- **Integración Kappa-Sigma Pura:** Eliminación drástica y limpia de trazas de satélites, estelas de aviones y artefactos transitorios mediante rechazo por desviación absoluta respecto a la mediana (MAD) sin elevar el ruido de fondo.
+- **Conservación Íntegra del Sensor (Sin Auto-Crop):** Relleno periférico reflectivo (`BORDER_REFLECT`) que neutraliza los marcos y escalones oscuros provocados por la rotación del campo estelar, conservando el 100% de la resolución nativa original.
+- **Motor Optimizado por Bloques:** Procesamiento segmentado en franjas (200 filas) que previene desbordamientos de memoria RAM (`MemoryError`) y cuellos de botella de transferencia GPU en lotes pesados.
+- **Modos de Suelo Flexibles:** Integración dual completa (cielo alineado + suelo estático), uso del suelo de la toma de referencia o composición directa desde una exposición dedicada en la pestaña Suelo.
+- **Antipolución Lumínica:** Algoritmos selectivos de atenuación de gradientes de fondo (Sustracción de Domo, Rechazo Asimétrico Min-Sigma y Normalización Local).
+
+### 3. Segmentación y Máscaras Interactivas
+- **GrabCut Guiado Multiescala:** Delineación asistida del horizonte y perfiles complejos (árboles, relieve montañoso, estructuras).
 - **Edición Continua no Destructiva:** Permite refinar la máscara, seguir corrigiendo con trazos de pincel en tiempo real y recalcular sin reiniciar el trabajo.
 - **Control Paramétrico Fino:** Ajuste del radio de difusión/suavizado gaussiano del borde (feathering) e iteraciones del modelo.
-- **Zoom 1:1 Nativo con Clic Derecho:** Inspección pixel a pixel del sensor original para retoque milimétrico de bordes.
+- **Zoom 1:1 Nativo con Clic Derecho:** Inspección píxel a píxel del sensor original para retoque milimétrico de bordes.
 
-### 3. Revelador Astrofotográfico Avanzado
+### 4. Revelador Astrofotográfico Avanzado
 - **Canal Lineal Puro:** Pipeline optimizado en coma flotante (float32), preservando la linealidad fotométrica hasta la compresión tonal final.
 - **Separación de Estrellas con StarNet++:** Extracción de capas Starless y Stars-only en espacio lineal, permitiendo trabajar nebulosas y polvo galáctico sin hinchar las estrellas.
 - **Estructura Multiescala por Ondículas (À Trous / B-Spline):** Realce selectivo de filamentos de gas y bandas de absorción de la Vía Láctea, junto con atenuación de la capa residual de fondo.
-- **Extracción de Gradientes:** Motor dual integrado con GraXpert AI y ajuste polinómico cuadrático para corregir viñeteo y gradientes luminosos.
+- **Extracción de Gradientes:** Motor dual integrado con GraXpert AI y ajuste polinómico cuadrático para corregir gradientes luminosos.
 - **Reducción de Ruido Adaptativa:** Múltiples métodos para el fondo (Filtro Bilateral, Filtro Guiado y Non-Local Means) respetando los límites de las estrellas.
 - **Balance de Color Fino y Tonalidad:** Curvas interactivas con histograma integrado en tiempo real, balance de temperatura/tinte calibrado ($\pm0.250$), control de vibranza y saturación diferencial cielo/suelo.
 
-### 4. Configuración y Entorno
-- ** Detección automática y manual de ejecutables CLI externos.
-- ** Ajustes de rendimiento y tamaño del proxy visual.   
+### 5. Configuración y Rendimiento
+- **Aceleración por GPU Dual:** Soporte automático para NVIDIA CUDA mediante CuPy y conmutación transparente a CPU multinúcleo en equipos sin GPU dedicada.
+- **Estrategias de Memoria Configurables:** Modos automático, memoria RAM intermedia de alta velocidad o volcado temporal a disco SSD para equipos con recursos limitados.
+- **Detección Automática de Binarios:** Localización y validación de ejecutables externos de StarNet++ CLI y GraXpert.
+
 ---
 
 ## Estructura del Proyecto
+
 ```text
 apilator/
 ├── config.json              # Configuración persistente del usuario
 ├── run_app.py               # Punto de entrada de la aplicación
 ├── core/
 │   ├── config_manager.py    # Carga y almacenamiento de ajustes JSON
+│   ├── gpu_backend.py       # Detección y gestión de aceleración NVIDIA CUDA / CuPy
 │   ├── graxpert_bridge.py   # Conector CLI con GraXpert AI
-│   ├── masking.py           # 
-│   ├── project_manager.py   # 
+│   ├── masking.py           # Algoritmos de segmentación y refinado guiado de máscaras
+│   ├── project_manager.py   # Serialización y persistencia de proyectos (.mwstack)
 │   ├── starnet_bridge.py    # Conector y parser CLI con StarNet++ v2
-│   ├── stacking.py          # Motor de registro, RANSAC y apilado Kappa-Sigma
-│   └── stretch.py           # Algoritmos MTF, Balance de Blancos y Saturación
+│   ├── stacking.py          # Motor de calibración (Dark/Flat/Bias), alineación y apilado
+│   └── stretch.py           # Algoritmos MTF, ondículas À Trous, balance y tono
 └── gui/
-    ├── canvas.py            # Visor interactivo QGraphicsView acelerado
-    ├── main_window.py       # Ventana principal y gestión de pestañas
+    ├── canvas.py            # Visor interactivo QGraphicsView acelerado con zoom 1:1
+    ├── main_window.py       # Ventana principal y gestión de pestañas maestras
     ├── tab_developer.py     # Pestaña de revelado y composición de capas
     ├── tab_settings.py      # Pestaña de configuración de rutas y parámetros
-    ├── tab_stacker.py       # Pestaña de apilado dual cielo/suelo
-    └── worker.py            # Hilos de ejecución en segundo plano (QThread)
+    ├── tab_stacker.py       # Pestaña de apilado dual, calibración y máscaras
+    └── worker.py            # Orquestador de tareas en segundo plano multihilo (QThread)
 ```
 
 ## Instalacion y Requisitos
@@ -81,7 +76,7 @@ apilator/
   - `rawpy` (decodificación de archivos RAW de cámara)
   - `tifffile` (lectura y escritura de imágenes TIFF de alta profundidad)
   - `astropy` (gestión de archivos FITS astronómicos)
-  - `imagecodecs` ()
+  - `imagecodecs` (códecs extendidos de compresión de imagen)
   - *(Opcional)* `cupy` (aceleración por GPU NVIDIA CUDA)
 - **Binarios Externos:**
   - Ejecutables de StarNet++ CLI y GraXpert configurados en el entorno.
@@ -114,29 +109,37 @@ Si dispones de una tarjeta grafica NVIDIA, puedes habilitar el procesamiento ace
 Inicia la herramienta ejecutando:
 python run_app.py
 
-Flujo de Trabajo Recomendado
-	Flujo de Apilado:
-        Ve a la pestaña Apilador.
-        Carga tu serie de tomas (RAW o TIFF) y selecciona la toma base de referencia.
-        Dibuja los trazos base: Verde para el cielo y Rojo para el suelo.
-        Haz clic en Refinar Automática para obtener la máscara inicial. Usa el clic derecho para inspeccionar al 100% y pulir zonas difíciles.
-        Configura las opciones de rechazo Min-Sigma y pulsa Apilar Tomas.
-    Flujo de Revelado:
-        La imagen resultante se enviará automáticamente a la pestaña Revelador (o puedes abrir un archivo TIFF/FITS existente).
-        Neutraliza gradientes con el motor Polinómico o GraXpert.
-        Ejecuta StarNet++ para desacoplar el fondo de las estrellas.
-        Aplica realce de gas y polvo galáctico mediante los deslizadores de Estructura Multiescala (Ondículas).
-        Ajusta curvas, balance fino y saturación, e inspecciona cualquier zona en escala nativa (clic derecho).
-        Haz clic en Exportar Imagen Revelada (soporta TIFF 16-bit, TIFF 32-bit float y JPEG).
+## Flujo de Trabajo Recomendado
+### 1. Flujo de Calibración y Apilado
+* Abre la pestaña 1. Apilador (Stacker).
+* Carga tus tomas de luz en Lights y haz doble clic sobre la toma que servirá como base de encuadre.
+* (Opcional) Carga tomas en Darks, Flats y Bias para corrección de ruido térmico, viñeteo óptico y offset.
+* Dibuja los trazos guía sobre la vista previa: Verde para el cielo y Rojo para el suelo.
+* Haz clic en Refinar Automática para generar la máscara. Inspecciona los bordes manteniendo pulsado el botón derecho del ratón para ver la imagen al 100% de resolución nativa.
+* Selecciona el Modo de Captura (Trípode Fijo o Star Tracker), el tratamiento del suelo deseado y el Factor Kappa.
+* Pulsa INICIAR APILADO DUAL.
 
-Hoja de Ruta
+### 2. Flujo de Revelado
+* Al concluir el apilado, la imagen lineal de 32 bits y su máscara calculada se cargarán automáticamente en la pestaña 2. Revelador / Editor.
+* Neutraliza gradientes residuales con el motor Polinómico o GraXpert AI.
+* Ejecuta StarNet++ para separar el fondo galáctico de las estrellas.
+* Aplica realce de gas y polvo molecular mediante los controles de Estructura Multiescala (Ondículas) sin deformar el perfil estelar.
+* Ajusta curvas, temperatura de color, tinte y saturación diferencial cielo/suelo.
+* Exporta el resultado final en formato TIFF 16-bit, TIFF 32-bit float o JPEG.
 
-    Apilado con alineación estelar y rechazo Min-Sigma.
-    Máscaras guiadas interactivas y zoom 1:1 nativo.
-    Integración de StarNet++ y GraXpert AI.
-    Descomposición y realce multiescala mediante ondículas.
-    Módulo de composición panorámica para mosaicos nocturnos.
-    Exportación de perfiles de color ICC embebidos (sRGB / AdobeRGB / ProPhoto).
+## Hoja de Ruta
+[x] Apilado diferencial cielo/suelo con alineación estelar por homografía.
+[x] Rechazo estadístico Kappa-Sigma (MAD) libre de trazas de satélites y aviones.
+[x] Pipeline completo de calibración con Darks, Flats y Bias.
+[x] Conservación íntegra de resolución nativa mediante BORDER_REFLECT.
+[x] Gestión de proyectos y sesiones en disco (.mwstack).
+[x] Segmentación asistida GrabCut y zoom nativo 1:1.
+[x] Descomposición y realce multiescala mediante ondículas À Trous.
+[x] Integración de StarNet++ v2 y GraXpert AI.
+[ ] Procesado por lotes para secuencias de timelapse.
+[ ] Rutina específica de apilado y alineación para eclipses solares.
+[ ] Módulo de composición panorámica para mosaicos nocturnos.
+[ ] Exportación de perfiles de color ICC embebidos (sRGB / AdobeRGB / ProPhoto).
 ---
 
 ## Licencia

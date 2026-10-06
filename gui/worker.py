@@ -22,6 +22,7 @@ from core.stacking import (
     detect_sky_stars, 
     refine_star_centroids,
     stream_stack_auto,
+    create_master_bias,
     create_master_dark,
     create_master_flat,
     calibrate_light,
@@ -108,6 +109,7 @@ class StackingWorker(QThread):
             lights = self.config.get("lights", [])
             darks = self.config.get("darks", [])
             flats = self.config.get("flats", [])
+            bias = self.config.get("bias", [])
             sky_mask = self.config.get("mask", None)
             mode = self.config.get("mode", "fixed_tripod")
             ground_mode = self.config.get("ground_mode", "dual")
@@ -144,44 +146,53 @@ class StackingWorker(QThread):
             temp_dir = tempfile.mkdtemp(prefix="astro_gui_")
 
             # ============================================================
-            # FASE 1/4: CALIBRACIÓN / MASTER DARK (Rango 2% -> 10%)
+            # FASE 1/4: CALIBRACIÓN (BIAS, DARKS, FLATS) (2% -> 10%)
             # ============================================================
+            master_bias = None
+            if bias:
+                t0_bias = time.perf_counter()
+                self.status_changed.emit(f"[Fase 1/4] Generando Master Bias a partir de {len(bias)} tomas...")
+                self.progress_changed.emit(3)
+                master_bias = create_master_bias(bias)
+                if self._is_cancelled:
+                    self.cancelled.emit()
+                    return
+                dt_bias = time.perf_counter() - t0_bias
+                self.status_changed.emit(f"-> Master Bias completado en {dt_bias:.1f}s.")
+            else:
+                self.status_changed.emit("[Fase 1/4] Sin tomas Bias.")
+
             master_dark = None
             if darks:
                 t0_darks = time.perf_counter()
                 self.status_changed.emit(f"[Fase 1/4] Generando Master Dark a partir de {len(darks)} tomas...")
-                self.progress_changed.emit(3)
+                self.progress_changed.emit(5)
                 master_dark = create_master_dark(darks)
-                
                 if self._is_cancelled:
                     self.cancelled.emit()
                     return
-
                 dt_darks = time.perf_counter() - t0_darks
                 self.status_changed.emit(f"-> Master Dark completado en {dt_darks:.1f}s.")
             else:
-                self.status_changed.emit("[Fase 1/4] Sin tomas Dark. Omitiendo calibración térmica.")
+                self.status_changed.emit("[Fase 1/4] Sin tomas Dark.")
 
-            if self._is_cancelled:
-                self.cancelled.emit()
-                return
-
-            # Generación de Master Flat
             master_flat = None
             if flats:
                 t0_flats = time.perf_counter()
                 self.status_changed.emit(f"[Fase 1/4] Generando Master Flat a partir de {len(flats)} tomas...")
-                self.progress_changed.emit(6)
-                master_flat = create_master_flat(flats, master_dark=master_dark)
-
+                self.progress_changed.emit(8)
+                master_flat = create_master_flat(flats, master_dark=master_dark, master_bias=master_bias)
                 if self._is_cancelled:
                     self.cancelled.emit()
                     return
-
                 dt_flats = time.perf_counter() - t0_flats
                 self.status_changed.emit(f"-> Master Flat completado en {dt_flats:.1f}s.")
             else:
-                self.status_changed.emit("[Fase 1/4] Sin tomas Flat. Omitiendo corrección de viñeteo.")
+                self.status_changed.emit("[Fase 1/4] Sin tomas Flat.")
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
 
             self.progress_changed.emit(10)
 
@@ -198,7 +209,12 @@ class StackingWorker(QThread):
             if sky_mask is not None and sky_mask.shape != (h, w):
                 sky_mask = cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_LINEAR)
             
-            ref_sky = calibrate_light(ref_raw, master_dark=master_dark, master_flat=master_flat)
+            ref_sky = calibrate_light(
+                ref_raw, 
+                master_dark=master_dark, 
+                master_flat=master_flat, 
+                master_bias=master_bias
+            )
             ref_stats = {"median": np.median(ref_sky, axis=(0, 1))}
 
             self.status_changed.emit("[Fase 2/4] Extrayendo estrellas de la referencia...")
@@ -271,7 +287,7 @@ class StackingWorker(QThread):
             tasks = []
             for idx, path in enumerate(lights[1:], start=2):
                 task_args = (
-                    idx, path, total_lights, temp_dir, mode, master_dark, master_flat,
+                    idx, path, total_lights, temp_dir, mode, master_dark, master_flat, master_bias,
                     ref_kps_pts, ref_desc, norm_type, ref_gray,
                     w, h, sky_mask, lp_method, lp_strength, ref_stats,
                     use_ram_buffer
