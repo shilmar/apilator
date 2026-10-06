@@ -81,11 +81,61 @@ def create_master_dark(dark_paths: list) -> np.ndarray:
 
     return master_dark
 
+def create_master_flat(flat_paths: list, master_dark: np.ndarray = None) -> np.ndarray:
+    """
+    Genera el Master Flat calculando la mediana de los cuadros planos (Flat frames)
+    y normalizándolo respecto a su media o mediana por canal para que actúe
+    como multiplicador de ganancia unitaria (~1.0).
+    """
+    if not flat_paths:
+        return None
 
-def calibrate_light(light_img: np.ndarray, master_dark: np.ndarray = None) -> np.ndarray:
-    if master_dark is None:
-        return light_img
-    return np.maximum(0.0, light_img - master_dark)
+    loaded_flats = []
+    for path in flat_paths:
+        img = load_image_as_float32(path)
+        if master_dark is not None:
+            img = np.maximum(0.0, img - master_dark)
+        loaded_flats.append(img)
+
+    if len(loaded_flats) == 1:
+        raw_flat = loaded_flats[0]
+    else:
+        stack = np.stack(loaded_flats, axis=0)
+        raw_flat = np.median(stack, axis=0).astype(np.float32)
+        del stack
+
+    del loaded_flats
+    gc.collect()
+
+    # Normalización canal a canal para preservar el balance de blancos (WB) original
+    master_flat = np.empty_like(raw_flat)
+    for ch in range(raw_flat.shape[2]):
+        channel_data = raw_flat[:, :, ch]
+        norm_val = np.mean(channel_data)
+        if norm_val > 1e-5:
+            master_flat[:, :, ch] = channel_data / norm_val
+        else:
+            master_flat[:, :, ch] = 1.0
+
+    return master_flat
+
+def calibrate_light(
+    light_img: np.ndarray, 
+    master_dark: np.ndarray = None, 
+    master_flat: np.ndarray = None
+) -> np.ndarray:
+    """
+    Calibra un cuadro de luz restando el Master Dark (si existe) y
+    dividiendo por el Master Flat normalizado (si existe).
+    """
+    calibrated = light_img if master_dark is None else np.maximum(0.0, light_img - master_dark)
+
+    if master_flat is not None:
+        # División segura protegiendo contra ceros o valores extremadamente bajos
+        safe_flat = np.where(master_flat > 1e-4, master_flat, 1.0)
+        calibrated = np.clip(calibrated / safe_flat, 0.0, 1.0)
+
+    return calibrated.astype(np.float32)
 
 
 def estimate_frame_background_dome(img_rgb: np.ndarray, sky_mask: np.ndarray = None) -> np.ndarray:
@@ -199,7 +249,7 @@ def save_frame_float32(filepath: str, img_float32: np.ndarray):
 
 def align_single_light_task(args: tuple) -> dict:
     (
-        idx, path, total_lights, temp_dir, mode, master_dark,
+        idx, path, total_lights, temp_dir, mode, master_dark, master_flat,
         ref_kps_pts, ref_desc, norm_type, ref_gray,
         w, h, sky_mask, lp_method, lp_strength, ref_stats,
         use_ram_buffer
@@ -220,7 +270,7 @@ def align_single_light_task(args: tuple) -> dict:
 
     try:
         raw_frame = load_image_as_float32(path)
-        calibrated_frame = calibrate_light(raw_frame, master_dark)
+        calibrated_frame = calibrate_light(raw_frame, master_dark=master_dark, master_flat=master_flat)
 
         curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
         if curr_desc is None or len(curr_kp) < 15:

@@ -71,6 +71,7 @@ class StackerTab(QWidget):
         self.project_mgr = ProjectManager()
         self.lights_list = []
         self.darks_list = []
+        self.flats_list = []
         self.ground_list = []
         self.computed_mask = None
         self.last_stacked_output_path = None
@@ -127,7 +128,7 @@ class StackerTab(QWidget):
         proj_layout.addLayout(btn_proj_row)
         left_layout.addWidget(self.grp_project)
 
-        # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Suelo)
+        # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Flats / Suelo)
         self.tabs_files = QTabWidget()
         
         self.list_lights = QListWidget()
@@ -136,6 +137,9 @@ class StackerTab(QWidget):
 
         self.list_darks = QListWidget()
         self.tabs_files.addTab(self.list_darks, "Darks")
+
+        self.list_flats = QListWidget()
+        self.tabs_files.addTab(self.list_flats, "Flats")
 
         self.list_ground = QListWidget()
         self.list_ground.itemDoubleClicked.connect(self.on_ground_double_clicked)
@@ -325,6 +329,9 @@ class StackerTab(QWidget):
         elif tab_name == "Darks":
             widget_list = self.list_darks
             files_data = self.darks_list
+        elif tab_name == "Flats":
+            widget_list = self.list_flats
+            files_data = self.flats_list
         else:
             widget_list = self.list_ground
             files_data = self.ground_list
@@ -343,6 +350,8 @@ class StackerTab(QWidget):
             file_list = self.lights_list
         elif tab_name == "Darks":
             file_list = self.darks_list
+        elif tab_name == "Flats":
+            file_list = self.flats_list
         else:
             file_list = self.ground_list
 
@@ -361,12 +370,14 @@ class StackerTab(QWidget):
                 self._refresh_list_view("Lights")
             elif tab_name == "Darks":
                 self._refresh_list_view("Darks")
+            elif tab_name == "Flats":
+                self._refresh_list_view("Flats")
             else:
                 self._refresh_list_view("Suelo")
 
     def add_current_tab_files(self):
         idx = self.tabs_files.currentIndex()
-        tab_names = ["Lights", "Darks", "Suelo"]
+        tab_names = ["Lights", "Darks", "Flats", "Suelo"]
         tab_name = tab_names[idx]
 
         paths, _ = QFileDialog.getOpenFileNames(
@@ -393,6 +404,13 @@ class StackerTab(QWidget):
             self._refresh_list_view("Darks")
             self.log_message(f"Añadidos {len(paths)} Darks. Total: {len(self.darks_list)}")
 
+        elif idx == 2:
+            for p in paths:
+                if p not in self.flats_list:
+                    self.flats_list.append(p)
+            self._refresh_list_view("Flats")
+            self.log_message(f"Añadidos {len(paths)} Flats. Total: {len(self.flats_list)}")
+
         else:
             for p in paths:
                 if p not in self.ground_list:
@@ -414,6 +432,10 @@ class StackerTab(QWidget):
             self.darks_list.clear()
             self.list_darks.clear()
             self.log_message("Lista de Darks vaciada.")
+        elif idx == 2:
+            self.flats_list.clear()
+            self.list_flats.clear()
+            self.log_message("Lista de Flats vaciada.")
         else:
             self.ground_list.clear()
             self.list_ground.clear()
@@ -569,6 +591,7 @@ class StackerTab(QWidget):
 
             self.lights_list.clear()
             self.darks_list.clear()
+            self.flats_list.clear()
             self.ground_list.clear()
 
             for fpath in data.get("light_frames", []):
@@ -578,6 +601,10 @@ class StackerTab(QWidget):
             for fpath in data.get("dark_frames", []):
                 if os.path.exists(fpath):
                     self.darks_list.append(fpath)
+
+            for fpath in data.get("flat_frames", []):
+                if os.path.exists(fpath):
+                    self.flats_list.append(fpath)
 
             for fpath in data.get("ground_frames", []):
                 if os.path.exists(fpath):
@@ -597,6 +624,7 @@ class StackerTab(QWidget):
 
             self._refresh_list_view("Lights")
             self._refresh_list_view("Darks")
+            self._refresh_list_view("Flats")
             self._refresh_list_view("Suelo")
 
             if loaded_mask is not None:
@@ -610,7 +638,8 @@ class StackerTab(QWidget):
             self.session_title_changed.emit(name)
             self.log_message(
                 f"[PROYECTO] Cargada: {len(self.lights_list)} Lights, "
-                f"{len(self.darks_list)} Darks, {len(self.ground_list)} Suelo."
+                f"{len(self.darks_list)} Darks, {len(self.flats_list)} Flats, "
+                f"{len(self.ground_list)} Suelo."
             )
 
         except Exception as e:
@@ -620,6 +649,7 @@ class StackerTab(QWidget):
     def _do_save(self, filepath: str):
         self.project_mgr.data["light_frames"] = self.lights_list
         self.project_mgr.data["dark_frames"] = self.darks_list
+        self.project_mgr.data["flat_frames"] = self.flats_list
         self.project_mgr.data["ground_frames"] = self.ground_list
         self.project_mgr.data["mode"] = "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker"
         self.project_mgr.data["ground_mode_idx"] = self.combo_ground.currentIndex()
@@ -639,9 +669,11 @@ class StackerTab(QWidget):
     def reset_session(self):
         self.lights_list.clear()
         self.darks_list.clear()
+        self.flats_list.clear()
         self.ground_list.clear()
         self.list_lights.clear()
         self.list_darks.clear()
+        self.list_flats.clear()
         self.list_ground.clear()
         self.current_ref_path = None
         self.last_stacked_output_path = None
@@ -726,6 +758,7 @@ class StackerTab(QWidget):
         cfg = {
             "lights": self.lights_list,
             "darks": self.darks_list,
+            "flats": self.flats_list,
             "mask": self.computed_mask,
             "mode": "fixed_tripod" if self.combo_mode.currentIndex() == 0 else "star_tracker",
             "ground_mode": selected_ground_mode,
@@ -827,7 +860,7 @@ class StackerTab(QWidget):
         self.tabs_files.setEnabled(not busy)
         self.btn_add_files.setEnabled(not busy)
         self.btn_clear_files.setEnabled(not busy)
-        self.grp_settings.setEnabled(not busy)
+        self.grp_settings.setEnabled(not busy)        
         self.grp_stack_lp.setEnabled(not busy)
         self.grp_mask.setEnabled(not busy)
 
