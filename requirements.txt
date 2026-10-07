@@ -15,5 +15,3 @@ astropy>=6.0.0
 # Gestión de memoria y recursos
 psutil>=5.9.0
 
-# Aceleración por GPU (Opcional - requiere NVIDIA CUDA Toolkit)
-# cupy-cuda12x>=12.0.0

@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import tifffile
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 from PySide6.QtCore import QThread, Signal
 
@@ -28,7 +28,6 @@ from core.stacking import (
     create_master_flat,
     calibrate_light,
     preprocess_subframe_lp,          
-    HAS_GPU,
     align_single_light_task,
     save_frame_float32
 )
@@ -101,6 +100,7 @@ class StackingWorker(QThread):
 
     def run(self):
         temp_dir = None
+        ref_raw_ground = None
         t_global_start = time.perf_counter()
         sky_frames_collection = []
         ground_frames_collection = []
@@ -130,7 +130,6 @@ class StackingWorker(QThread):
 
             lp_method = self.config.get("lp_method", "standard")
             lp_strength = float(self.config.get("lp_strength", 0.5))
-            use_gpu = self.config.get("use_gpu", True) and HAS_GPU
             
             cpu_workers = min(4, max(1, int(self.config.get("cpu_workers", 4))))
             storage_strategy = self.config.get("storage_strategy", "auto")
@@ -238,7 +237,7 @@ class StackingWorker(QThread):
             self.progress_changed.emit(10)
 
             # ============================================================
-            # FASE 2/4: REFERENCIA Y ALINEACIÓN DE LIGHTS (Rango 10% -> 60%)
+            # FASE 2/4: REFERENCIA Y ALINEACIÓN DE LIGHTS
             # ============================================================
             t0_ref = time.perf_counter()
             ref_path = lights[0]
@@ -249,37 +248,56 @@ class StackingWorker(QThread):
 
             if sky_mask is not None and sky_mask.shape != (h, w):
                 sky_mask = cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_LINEAR)
-            
+
+            # Persistencia temporal de maestros en .bin (Cero sobrecarga IPC)
+            p_mb = os.path.join(temp_dir, "master_bias.bin") if master_bias is not None else None
+            if p_mb and master_bias is not None:
+                master_bias.astype(np.float32).tofile(p_mb)
+
+            p_md = os.path.join(temp_dir, "master_dark.bin") if master_dark is not None else None
+            if p_md and master_dark is not None:
+                master_dark.astype(np.float32).tofile(p_md)
+
+            p_mf = os.path.join(temp_dir, "master_flat.bin") if master_flat is not None else None
+            if p_mf and master_flat is not None:
+                master_flat.astype(np.float32).tofile(p_mf)
+
+            # Persistir máscara de cielo temporalmente
+            p_mask = os.path.join(temp_dir, "sky_mask.bin") if sky_mask is not None else None
+            if p_mask and sky_mask is not None:
+                sky_mask.astype(np.float32).tofile(p_mask)
+
+            # Calibrar referencia in-place sobre ref_raw
             ref_sky = calibrate_light(
-                ref_raw, 
-                master_dark=master_dark, 
-                master_flat=master_flat, 
+                ref_raw,
+                master_dark=master_dark,
+                master_flat=master_flat,
                 master_bias=master_bias
             )
-            ref_stats = {"median": np.median(ref_sky, axis=(0, 1))}
+            # Mediana rápida por submuestreo
+            ref_stats = {"median": np.median(ref_sky[::8, ::8], axis=(0, 1))}
+
+            # Liberar arrays maestros de la memoria principal
+            del master_bias, master_dark, master_flat
+            gc.collect()
 
             self.status_changed.emit("[Fase 2/4] Extrayendo estrellas de la referencia...")
             ref_kp, ref_desc, norm_type = detect_sky_stars(ref_sky, sky_mask=sky_mask)
-            ref_gray = cv2.cvtColor((ref_sky * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
             self.status_changed.emit(f"-> Estrellas base detectadas: {len(ref_kp)}")
 
             if ref_desc is None or len(ref_kp) < 15:
                 raise RuntimeError("No se detectaron suficientes estrellas en la toma de referencia para alinear.")
 
-            if self._is_cancelled:
-                self.cancelled.emit()
-                return
+            # Conversión ligera a escala de grises: de RGB float32 a GRAY float32 (24 MB) y luego uint8
+            ref_gray_f32 = cv2.cvtColor(ref_sky, cv2.COLOR_RGB2GRAY)
+            ref_gray = np.clip(ref_gray_f32 * 255.0, 0, 255).astype(np.uint8)
+            del ref_gray_f32
 
-            has_ground = (sky_mask is not None and mode == "fixed_tripod")
-            use_ram_buffer = evaluate_storage_mode(
-                strategy=storage_strategy,
-                num_frames=len(lights),
-                h=h, w=w, c=c,
-                has_ground=has_ground
-            )
-            storage_label = "Memoria RAM (Ultra-rápido)" if use_ram_buffer else "Caché en Disco (.bin)"
-            self.status_changed.emit(f"-> Estrategia de almacenamiento activa: [{storage_label}]")
+            p_ref_gray = os.path.join(temp_dir, "ref_gray.bin")
+            ref_gray.tofile(p_ref_gray)
+            del ref_gray
 
+            # Preprocesar fondo in-place sin duplicaciones
             ref_sky_processed = preprocess_subframe_lp(
                 ref_sky,
                 method=lp_method,
@@ -288,25 +306,18 @@ class StackingWorker(QThread):
                 ref_stats=ref_stats
             )
 
-            ref_raw_ground = ref_raw.copy() if (ground_mode == "reference" and sky_mask is not None) else None
-
-            # Guardado directo de la referencia en el directorio temporal (.bin)
             p_sky_0 = os.path.join(temp_dir, "sky_0000.bin")
             save_frame_float32(p_sky_0, ref_sky_processed)
             sky_frames_collection.append(p_sky_0)
 
             if need_stack_ground:
                 p_gnd_0 = os.path.join(temp_dir, "gnd_0000.bin")
-                save_frame_float32(p_gnd_0, ref_raw)
+                save_frame_float32(p_gnd_0, ref_sky_processed)
                 ground_frames_collection.append(p_gnd_0)
 
-            # Liberación segura de variables sin colisiones de scope
-            for var in ['ref_raw', 'ref_sky', 'ref_sky_processed']:
-                if var in locals():
-                    try:
-                        del locals()[var]
-                    except Exception:
-                        pass
+            del ref_sky, ref_sky_processed
+            if 'ref_raw' in locals():
+                del ref_raw
             gc.collect()
 
             dt_ref = time.perf_counter() - t0_ref
@@ -318,43 +329,45 @@ class StackingWorker(QThread):
                 return
 
             # Sub-fase de alineación concurrente (15% -> 60%)
+            # Sub-fase de alineación concurrente (15% -> 60%)
             t0_align = time.perf_counter()
             total_lights = len(lights)
             discarded_count = 0
-            to_align_count = total_lights - 1
+            to_align_count = max(1, total_lights - 1)
 
             ref_kps_pts = [(kp.pt[0], kp.pt[1]) for kp in ref_kp]
 
             tasks = []
             for idx, path in enumerate(lights[1:], start=2):
                 task_args = (
-                    idx, path, total_lights, temp_dir, mode, master_dark, master_flat, master_bias,
-                    ref_kps_pts, ref_desc, norm_type, ref_gray,
-                    w, h, sky_mask, lp_method, lp_strength, ref_stats,
-                    use_ram_buffer
+                    idx, path, total_lights, temp_dir, mode,
+                    p_md, p_mf, p_mb, p_mask, p_ref_gray,
+                    ref_kps_pts, ref_desc, norm_type,
+                    w, h, lp_method, lp_strength, ref_stats
                 )
                 tasks.append(task_args)
 
             aligned_results = []
             completed_count = 0
-            ctx = mp.get_context("spawn")
 
-            self._executor = ProcessPoolExecutor(max_workers=cpu_workers, mp_context=ctx)
+            # ThreadPoolExecutor: multi-hilo nativo en C sin sobrecarga IPC ni caídas de procesos en Windows
+            safe_workers = max(1, min(3, (os.cpu_count() or 4) - 1))
+
+            self._executor = ThreadPoolExecutor(max_workers=safe_workers)
             try:
                 futures = [self._executor.submit(align_single_light_task, t) for t in tasks]
 
                 for future in as_completed(futures):
                     if self._is_cancelled:
-                        _terminate_executor_processes(self._executor)
                         self.status_changed.emit("Alineación cancelada por el usuario.")
                         self.cancelled.emit()
                         return
 
+                    res = future.result()
                     completed_count += 1
                     pct_align = 15 + int((completed_count / max(1, to_align_count)) * 45)
                     self.progress_changed.emit(min(60, pct_align))
 
-                    res = future.result()
                     aligned_results.append(res)
 
                     if res["success"]:
@@ -391,13 +404,14 @@ class StackingWorker(QThread):
 
             dt_align = time.perf_counter() - t0_align
             self.status_changed.emit(
-                f"-> Alineación completada ({to_align_count} tomas en {dt_align:.1f}s | {dt_align / max(1, to_align_count):.2f}s/toma)."
+                f"-> Alineación completada ({len(sky_frames_collection)}/{total_lights} tomas integradas en {dt_align:.1f}s)."
             )
-            if discarded_count > 0:
-                self.status_changed.emit(f"-> Resumen: {discarded_count} toma(s) descartada(s).")
 
             if len(sky_frames_collection) < 2:
-                raise RuntimeError("No se pudieron alinear suficientes tomas con la referencia.")
+                raise RuntimeError(
+                    f"Fallo crítico en alineación: Solo se registraron {len(sky_frames_collection)} tomas válidas. "
+                    "Se requieren al menos 2 tomas para apilar."
+                )
 
             self.progress_changed.emit(60)
 
@@ -408,11 +422,11 @@ class StackingWorker(QThread):
                 self.cancelled.emit()
                 return
 
-            backend_label = "GPU CUDA (NVIDIA)" if use_gpu else "CPU Multi-Core"
+            has_ground = (sky_mask is not None and mode == "fixed_tripod")
             sky_target_pct = 78 if has_ground else 95
 
             self.status_changed.emit(
-                f"[Fase 3/4] Apilando Cielo ({len(sky_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f}, LP={lp_method})..."
+                f"[Fase 3/4] Apilando Cielo ({len(sky_frames_collection)} tomas) con CPU Multi-Core (Kappa={kappa:.1f}, LP={lp_method})..."
             )
             self.progress_changed.emit(63)
 
@@ -423,8 +437,7 @@ class StackingWorker(QThread):
                 chunk_rows=200, 
                 kappa=kappa,
                 lp_method=lp_method,
-                lp_strength=lp_strength,
-                use_gpu=use_gpu
+                lp_strength=lp_strength
             )
 
             if self._is_cancelled:
@@ -450,7 +463,7 @@ class StackingWorker(QThread):
                 # MODO 1: Apilar ráfaga de suelo completa (Dual)
                 if ground_mode == "dual" and len(ground_frames_collection) >= 2:
                     self.status_changed.emit(
-                        f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con [{backend_label}] (Kappa={kappa:.1f})..."
+                        f"[Fase 3/4] Apilando Suelo ({len(ground_frames_collection)} tomas) con CPU Multi-Core (Kappa={kappa:.1f})..."
                     )
                     self.progress_changed.emit(80)
 
@@ -459,8 +472,7 @@ class StackingWorker(QThread):
                         ground_frames_collection, 
                         (h, w, c), 
                         chunk_rows=200, 
-                        kappa=kappa,
-                        use_gpu=use_gpu
+                        kappa=kappa
                     )
                     
                     if self._is_cancelled:

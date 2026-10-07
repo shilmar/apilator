@@ -5,25 +5,17 @@ import cv2
 import numpy as np
 import rawpy
 import tifffile
+import tempfile
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from astropy.io import fits
-from core.gpu_backend import is_gpu_enabled
-
-try:
-    import cupy as cp
-    if cp.cuda.runtime.getDeviceCount() > 0:
-        HAS_GPU = True
-    else:
-        HAS_GPU = False
-except Exception:
-    HAS_GPU = False
 
 
 def load_image_as_float32(filepath: str) -> np.ndarray:
+    """Carga imágenes optimizando memoria con operaciones in-place."""
     ext = os.path.splitext(filepath)[1].lower()
 
-    if ext in ['.nef', '.cr2', '.cr3', '.arw', '.dng']:
+    if ext in ['.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw']:
         with rawpy.imread(filepath) as raw:
             rgb = raw.postprocess(
                 gamma=(2.222, 4.5),
@@ -31,7 +23,10 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
                 output_bps=16,
                 use_camera_wb=True
             )
-            return (rgb.astype(np.float32) / 65535.0)
+            img_f32 = rgb.astype(np.float32)
+            del rgb
+            img_f32 *= np.float32(1.0 / 65535.0)
+            return img_f32
 
     elif ext in ['.fits', '.fit', '.fts']:
         with fits.open(filepath) as hdul:
@@ -40,100 +35,157 @@ def load_image_as_float32(filepath: str) -> np.ndarray:
                 data = np.stack([data] * 3, axis=-1)
             elif data.ndim == 3 and data.shape[0] in [3, 4]:
                 data = np.transpose(data[:3], (1, 2, 0))
-            d_min, d_max = data.min(), data.max()
-            return (data - d_min) / (d_max - d_min + 1e-8)
+            d_min, d_max = float(data.min()), float(data.max())
+            denom = d_max - d_min + 1e-8
+            data -= d_min
+            data /= denom
+            return data
 
     elif ext in ['.tif', '.tiff']:
         data = tifffile.imread(filepath).astype(np.float32)
         if data.ndim == 2:
             data = np.stack([data] * 3, axis=-1)
-        if data.max() <= 1.05 and data.min() >= 0.0:
+        d_max = float(data.max())
+        if d_max <= 1.05 and float(data.min()) >= 0.0:
             return np.clip(data, 0.0, 1.0)
-        max_val = 65535.0 if data.max() > 255.0 else 255.0
-        return np.clip(data / max_val, 0.0, 1.0)
+        max_val = 65535.0 if d_max > 255.0 else 255.0
+        data /= max_val
+        return np.clip(data, 0.0, 1.0)
 
     else:
         bgr = cv2.imread(filepath, cv2.IMREAD_COLOR)
         if bgr is None:
             raise ValueError(f"No se pudo leer el archivo: {filepath}")
-        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        del bgr
+        rgb *= np.float32(1.0 / 255.0)
+        return rgb
 
-def create_master_bias(bias_paths: list) -> np.ndarray:
+
+def get_image_dimensions(filepath: str) -> tuple[int, int]:
+    """Obtiene (alto, ancho) de forma rápida sin procesar la matriz completa."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ['.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw']:
+        with rawpy.imread(filepath) as raw:
+            h, w = raw.sizes.height, raw.sizes.width
+            if raw.sizes.flip in [5, 6, 7, 8]:
+                return w, h
+            return h, w
+    else:
+        info = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
+        if info is not None:
+            return info.shape[0], info.shape[1]
+    
+    img = load_image_as_float32(filepath)
+    h, w = img.shape[:2]
+    del img
+    return h, w
+
+
+# =========================================================================
+# CALIBRACIÓN: STREAMING DIRECTO A DISCO Y MEDIANA POR FRANJAS
+# =========================================================================
+
+def _median_stack_chunked(file_paths: list, chunk_size: int = 500, temp_dir: str = None) -> np.ndarray:
     """
-    Genera el Master Bias calculando la mediana de los cuadros de lectura rápida.
+    Calcula la mediana de una lista de tomas en disco sin cargar todas a la vez en RAM.
+    Vuelca cada toma a un binario temporal y lee por franjas horizontales.
     """
+    if not file_paths:
+        return None
+    if len(file_paths) == 1:
+        return load_image_as_float32(file_paths[0])
+
+    h, w = get_image_dimensions(file_paths[0])
+    c = 3
+
+    work_dir = temp_dir if (temp_dir and os.path.isdir(temp_dir)) else tempfile.gettempdir()
+    tmp_files = []
+    pid = os.getpid()
+
+    try:
+        # 1. Volcar cada imagen a binario en disco secuencialmente (máximo 1 imagen en RAM)
+        for i, p in enumerate(file_paths):
+            img = load_image_as_float32(p)
+            tmp_p = os.path.join(work_dir, f"calib_tmp_{pid}_{i:04d}.bin")
+            img.tofile(tmp_p)
+            tmp_files.append(tmp_p)
+            del img
+            gc.collect()
+
+        # 2. Asignar matriz final
+        master = np.empty((h, w, c), dtype=np.float32)
+        bytes_per_row = w * c * 4
+        n_frames = len(tmp_files)
+
+        # 3. Mediana por bloques de filas
+        for y1 in range(0, h, chunk_size):
+            y2 = min(h, y1 + chunk_size)
+            chunk_rows = y2 - y1
+            read_bytes = chunk_rows * bytes_per_row
+            offset = y1 * bytes_per_row
+
+            chunk_buf = np.empty((n_frames, chunk_rows, w, c), dtype=np.float32)
+            for f_idx, tf in enumerate(tmp_files):
+                with open(tf, "rb") as fp:
+                    fp.seek(offset)
+                    raw_bytes = fp.read(read_bytes)
+                    chunk_buf[f_idx] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((chunk_rows, w, c))
+
+            master[y1:y2] = np.median(chunk_buf, axis=0).astype(np.float32)
+            del chunk_buf
+
+    finally:
+        # Limpieza de temporales
+        for tf in tmp_files:
+            if os.path.exists(tf):
+                try:
+                    os.remove(tf)
+                except Exception:
+                    pass
+        gc.collect()
+
+    return master
+
+
+def create_master_bias(bias_paths: list, temp_dir: str = None) -> np.ndarray:
     if not bias_paths:
         return None
+    return _median_stack_chunked(bias_paths, chunk_size=500, temp_dir=temp_dir)
 
-    loaded_bias = []
-    for path in bias_paths:
-        img = load_image_as_float32(path)
-        loaded_bias.append(img)
 
-    if len(loaded_bias) == 1:
-        return loaded_bias[0]
-
-    stack = np.stack(loaded_bias, axis=0)
-    del loaded_bias
-    gc.collect()
-
-    master_bias = np.median(stack, axis=0).astype(np.float32)
-    del stack
-    gc.collect()
-
-    return master_bias
-
-def create_master_dark(dark_paths: list) -> np.ndarray:
+def create_master_dark(dark_paths: list, master_bias: np.ndarray = None, temp_dir: str = None) -> np.ndarray:
     if not dark_paths:
         return None
+    master_dark = _median_stack_chunked(dark_paths, chunk_size=500, temp_dir=temp_dir)
+    if master_bias is not None:
+        np.subtract(master_dark, master_bias, out=master_dark)
+        np.maximum(master_dark, 0.0, out=master_dark)
+    gc.collect()
+    return master_dark
 
-    loaded_darks = []
-    for path in dark_paths:
-        img = load_image_as_float32(path)
-        loaded_darks.append(img)
 
-    if len(loaded_darks) == 1:
-        return loaded_darks[0]
-
-    stack = np.stack(loaded_darks, axis=0)
-def create_master_flat(flat_paths: list, master_dark: np.ndarray = None, master_bias: np.ndarray = None) -> np.ndarray:
-    """
-    Genera el Master Flat restando el pedestal electrónico (Bias o Dark)
-    y normalizando por canal a ganancia unitaria (~1.0).
-    """
+def create_master_flat(flat_paths: list, master_dark: np.ndarray = None, master_bias: np.ndarray = None, temp_dir: str = None) -> np.ndarray:
     if not flat_paths:
         return None
-
-    # Resta preferente: si hay Bias se resta el bias; si no, el dark
     pedestal = master_bias if master_bias is not None else master_dark
+    master_flat = _median_stack_chunked(flat_paths, chunk_size=500, temp_dir=temp_dir)
 
-    loaded_flats = []
-    for path in flat_paths:
-        img = load_image_as_float32(path)
-        if pedestal is not None:
-            img = np.maximum(0.0, img - pedestal)
-        loaded_flats.append(img)
+    if pedestal is not None:
+        np.subtract(master_flat, pedestal, out=master_flat)
+        np.maximum(master_flat, 0.0, out=master_flat)
 
-    if len(loaded_flats) == 1:
-        raw_flat = loaded_flats[0]
-    else:
-        stack = np.stack(loaded_flats, axis=0)
-        raw_flat = np.median(stack, axis=0).astype(np.float32)
-        del stack
-
-    del loaded_flats
-    gc.collect()
-
-    master_flat = np.empty_like(raw_flat)
-    for ch in range(raw_flat.shape[2]):
-        channel_data = raw_flat[:, :, ch]
-        norm_val = np.mean(channel_data)
+    for ch in range(master_flat.shape[2]):
+        channel_data = master_flat[:, :, ch]
+        norm_val = float(np.mean(channel_data))
         if norm_val > 1e-5:
-            master_flat[:, :, ch] = channel_data / norm_val
+            channel_data /= norm_val
         else:
-            master_flat[:, :, ch] = 1.0
+            channel_data.fill(1.0)
 
+    gc.collect()
     return master_flat
+
 
 def calibrate_light(
     light_img: np.ndarray, 
@@ -141,18 +193,21 @@ def calibrate_light(
     master_flat: np.ndarray = None,
     master_bias: np.ndarray = None
 ) -> np.ndarray:
+    """Aplica calibración con operaciones in-place."""
     if master_dark is not None:
-        calibrated = np.maximum(0.0, light_img - master_dark)
+        np.subtract(light_img, master_dark, out=light_img)
+        np.maximum(light_img, 0.0, out=light_img)
     elif master_bias is not None:
-        calibrated = np.maximum(0.0, light_img - master_bias)
-    else:
-        calibrated = light_img
+        np.subtract(light_img, master_bias, out=light_img)
+        np.maximum(light_img, 0.0, out=light_img)
 
     if master_flat is not None:
         safe_flat = np.where(master_flat > 1e-4, master_flat, 1.0)
-        calibrated = np.clip(calibrated / safe_flat, 0.0, 1.0)
+        np.divide(light_img, safe_flat, out=light_img)
+        np.clip(light_img, 0.0, 1.0, out=light_img)
+        del safe_flat
 
-    return calibrated.astype(np.float32)
+    return light_img
 
 
 def estimate_frame_background_dome(img_rgb: np.ndarray, sky_mask: np.ndarray = None) -> np.ndarray:
@@ -189,31 +244,92 @@ def preprocess_subframe_lp(
     sky_mask: np.ndarray = None,
     ref_stats: dict = None
 ) -> np.ndarray:
+    """
+    Aplica sustracción de gradiente o normalización local in-place canal por canal.
+    Pico de asignación en memoria < 95 MiB (cero arrays 3D duplicados).
+    """
     if strength <= 1e-4 or method in ["standard", "min_rejection"]:
         return frame_rgb
 
     h, w, c = frame_rgb.shape
 
     if method == "sequator_subtraction":
-        bg_dome = estimate_frame_background_dome(frame_rgb, sky_mask=sky_mask)
-        pedestal = np.percentile(frame_rgb, 5, axis=(0, 1))
-        corrected = frame_rgb - (bg_dome * strength) + (pedestal * strength)
+        # 1. Estimar fondo a baja resolución (miniatura < 1 MB)
+        scale = max(1, min(h, w) // 120)
+        sh, sw = max(16, h // scale), max(16, w // scale)
+        small_img = cv2.resize(frame_rgb, (sw, sh), interpolation=cv2.INTER_AREA)
 
+        k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        bg_low = np.zeros_like(small_img)
+        for ch in range(c):
+            opened = cv2.morphologyEx(small_img[..., ch], cv2.MORPH_OPEN, k_open)
+            sigma = max(5.0, min(sh, sw) / 10.0)
+            bg_low[..., ch] = cv2.GaussianBlur(opened, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        del small_img
+
+        # 2. Pedestal por submuestreo rápido (4.5 MB en lugar de ordenar 280 MB)
+        sub_sample = frame_rgb[::8, ::8]
+        pedestal = np.percentile(sub_sample, 5, axis=(0, 1))
+        del sub_sample
+
+        # 3. Máscara 2D de cielo
+        m2d = None
         if sky_mask is not None:
-            m = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)[..., np.newaxis]
-            return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
-        return np.clip(corrected, 0.0, 1.0).astype(np.float32)
+            if sky_mask.shape[:2] != (h, w):
+                m2d = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                m2d = np.squeeze(sky_mask).astype(np.float32)
+
+        # 4. Sustracción in-place canal a canal (Máximo 93 MB asignados a la vez)
+        for ch in range(c):
+            bg_ch = cv2.resize(bg_low[..., ch], (w, h), interpolation=cv2.INTER_LINEAR)
+            ped_val = float(pedestal[ch])
+
+            # delta = (bg - ped) * strength
+            delta = (bg_ch - ped_val) * strength
+            del bg_ch
+
+            if m2d is not None:
+                delta *= m2d
+
+            frame_rgb[..., ch] -= delta
+            del delta
+            np.clip(frame_rgb[..., ch], 0.0, 1.0, out=frame_rgb[..., ch])
+
+        if m2d is not None:
+            del m2d
+        del bg_low
+        gc.collect()
+        return frame_rgb
 
     elif method == "local_norm" and ref_stats is not None:
-        curr_median = np.median(frame_rgb, axis=(0, 1))
+        sub_sample = frame_rgb[::8, ::8]
+        curr_median = np.median(sub_sample, axis=(0, 1))
+        del sub_sample
+
         target_median = ref_stats.get('median', curr_median)
         diff = (target_median - curr_median) * strength
-        corrected = frame_rgb + diff
 
+        m2d = None
         if sky_mask is not None:
-            m = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)[..., np.newaxis]
-            return np.clip(corrected * m + frame_rgb * (1.0 - m), 0.0, 1.0).astype(np.float32)
-        return np.clip(corrected, 0.0, 1.0).astype(np.float32)
+            if sky_mask.shape[:2] != (h, w):
+                m2d = cv2.resize(np.squeeze(sky_mask).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                m2d = np.squeeze(sky_mask).astype(np.float32)
+
+        for ch in range(c):
+            d_val = float(diff[ch])
+            if abs(d_val) > 1e-6:
+                if m2d is not None:
+                    frame_rgb[..., ch] += (d_val * m2d)
+                else:
+                    frame_rgb[..., ch] += d_val
+                np.clip(frame_rgb[..., ch], 0.0, 1.0, out=frame_rgb[..., ch])
+
+        if m2d is not None:
+            del m2d
+        gc.collect()
+        return frame_rgb
 
     return frame_rgb
 
@@ -266,10 +382,10 @@ def save_frame_float32(filepath: str, img_float32: np.ndarray):
 
 def align_single_light_task(args: tuple) -> dict:
     (
-        idx, path, total_lights, temp_dir, mode, master_dark, master_flat, master_bias,
-        ref_kps_pts, ref_desc, norm_type, ref_gray,
-        w, h, sky_mask, lp_method, lp_strength, ref_stats,
-        use_ram_buffer
+        idx, path, total_lights, temp_dir, mode,
+        p_md, p_mf, p_mb, p_mask, p_ref_gray,
+        ref_kps_pts, ref_desc, norm_type,
+        w, h, lp_method, lp_strength, ref_stats
     ) = args
 
     filename = os.path.basename(path)
@@ -286,6 +402,13 @@ def align_single_light_task(args: tuple) -> dict:
     }
 
     try:
+        # Carga instantánea por mapeo de memoria sin ocupar memoria en heap
+        master_dark = np.memmap(p_md, dtype=np.float32, mode='r', shape=(h, w, 3)) if (p_md and os.path.exists(p_md)) else None
+        master_bias = np.memmap(p_mb, dtype=np.float32, mode='r', shape=(h, w, 3)) if (p_mb and os.path.exists(p_mb) and master_dark is None) else None
+        master_flat = np.memmap(p_mf, dtype=np.float32, mode='r', shape=(h, w, 3)) if (p_mf and os.path.exists(p_mf)) else None
+        sky_mask = np.memmap(p_mask, dtype=np.float32, mode='r', shape=(h, w)) if (p_mask and os.path.exists(p_mask)) else None
+        ref_gray = np.asarray(np.memmap(p_ref_gray, dtype=np.uint8, mode='r', shape=(h, w))) if (p_ref_gray and os.path.exists(p_ref_gray)) else None
+
         raw_frame = load_image_as_float32(path)
         calibrated_frame = calibrate_light(
             raw_frame, 
@@ -293,6 +416,7 @@ def align_single_light_task(args: tuple) -> dict:
             master_flat=master_flat, 
             master_bias=master_bias
         )
+        del master_dark, master_flat, master_bias
 
         curr_kp, curr_desc, _ = detect_sky_stars(calibrated_frame, sky_mask=sky_mask)
         if curr_desc is None or len(curr_kp) < 15:
@@ -305,14 +429,17 @@ def align_single_light_task(args: tuple) -> dict:
         if len(good) < 10:
             raise RuntimeError(f"Correspondencias insuficientes con la referencia ({len(good)} pares).")
 
-        curr_gray = cv2.cvtColor((calibrated_frame * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        # Conversión directa y ligera a escala de grises (24 MB en lugar de 300 MB)
+        curr_gray_f32 = cv2.cvtColor(calibrated_frame, cv2.COLOR_RGB2GRAY)
+        curr_gray = np.clip(curr_gray_f32 * 255.0, 0, 255).astype(np.uint8)
+        del curr_gray_f32
+
         ref_matched_kps = [cv2.KeyPoint(ref_kps_pts[m.queryIdx][0], ref_kps_pts[m.queryIdx][1], 1.0) for m in good]
         curr_matched_kps = [curr_kp[m.trainIdx] for m in good]
 
         dst_pts = refine_star_centroids(ref_gray, ref_matched_kps)
         src_pts = refine_star_centroids(curr_gray, curr_matched_kps)
-
-        del curr_gray, curr_kp, curr_desc, matches, good
+        del curr_gray, ref_gray, curr_kp, curr_desc, matches, good
 
         H_matrix, inliers = cv2.findHomography(
             src_pts, dst_pts,
@@ -325,22 +452,19 @@ def align_single_light_task(args: tuple) -> dict:
         if H_matrix is None:
             H_aff, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
             if H_aff is None:
-                raise RuntimeError("Fallo RANSAC en homografía/afín.")
+                raise RuntimeError("Fallo RANSAC en homografía.")
             H_matrix = np.vstack([H_aff, [0.0, 0.0, 1.0]])
 
         num_inliers = int(np.sum(inliers)) if inliers is not None else 0
         del dst_pts, src_pts, inliers
 
         if sky_mask is not None:
-            sm = sky_mask if sky_mask.shape[:2] == (h, w) else cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-            sm_3d = sm[..., np.newaxis] if sm.ndim == 2 else sm
-            sky_median_val = np.median(calibrated_frame[sm > 0.5]) if np.any(sm > 0.5) else 0.05
+            sm_3d = sky_mask[..., np.newaxis]
+            sky_median_val = np.median(calibrated_frame[sky_mask > 0.5]) if np.any(sky_mask > 0.5) else 0.05
             clean_sky_frame = (calibrated_frame * sm_3d) + (sky_median_val * (1.0 - sm_3d))
         else:
             clean_sky_frame = calibrated_frame
 
-        # Regreso exacto al borderValue=(0, 0, 0) de la 0.5.5 (Cero NaNs)
-        # Relleno por reflexión en bordes para evitar franjas negras y conservar dimensiones completas
         warped = cv2.warpPerspective(
             clean_sky_frame, H_matrix, (w, h),
             flags=cv2.INTER_CUBIC,
@@ -355,7 +479,7 @@ def align_single_light_task(args: tuple) -> dict:
             sky_mask=sky_mask,
             ref_stats=ref_stats
         )
-        del warped
+        del warped, sky_mask
 
         p_sky = os.path.join(temp_dir, f"sky_{idx-1:04d}.bin")
         save_frame_float32(p_sky, warped_processed)
@@ -381,53 +505,8 @@ def align_single_light_task(args: tuple) -> dict:
 
 
 # =========================================================================
-# MOTOR MATEMÁTICO EXACTO DE LA VERSIÓN 0.5.5 CON CORRECCIÓN DE MÁRGENES
+# MOTOR DE INTEGRACIÓN ROBUSTO (KAPPA-SIGMA ESTRICTO)
 # =========================================================================
-
-def _process_chunk_gpu(sub_stack_np: np.ndarray, kappa: float, lp_method: str = "standard", lp_strength: float = 0.5) -> np.ndarray:
-    n_frames, actual_rows, w, c = sub_stack_np.shape
-    chunk_result = np.zeros((actual_rows, w, c), dtype=np.float32)
-
-    sub_stack_gpu = cp.asarray(sub_stack_np)
-
-    if lp_method == "min_rejection" and lp_strength > 1e-4:
-        target_p = max(5.0, 50.0 - (lp_strength * 40.0))
-        for ch in range(c):
-            ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
-            res = cp.percentile(ch_data, target_p, axis=0)
-            chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
-        del sub_stack_gpu
-        cp.get_default_memory_pool().free_all_blocks()
-        return chunk_result
-
-    # Motor original 0.5.5 exacto
-    upper_tol = kappa + 0.8
-    for ch in range(c):
-        ch_data = sub_stack_gpu[:, :, :, ch].reshape((n_frames, -1))
-        
-        med = cp.median(ch_data, axis=0)
-        abs_diff = cp.abs(ch_data - med)
-        mad = cp.median(abs_diff, axis=0)
-        sigma = 1.4826 * mad + 1e-6
-
-        low = med - 0.4 * sigma
-        high = med + upper_tol * sigma
-        
-        valid = (ch_data >= low) & (ch_data <= high)
-
-        filtered = cp.where(valid, ch_data, cp.nan)
-        res = cp.nanmean(filtered, axis=0)
-
-        nan_mask = cp.isnan(res)
-        if cp.any(nan_mask):
-            res[nan_mask] = med[nan_mask]
-
-        chunk_result[:, :, ch] = cp.asnumpy(res).reshape((actual_rows, w))
-
-    del sub_stack_gpu
-    cp.get_default_memory_pool().free_all_blocks()
-    return chunk_result
-
 
 def _process_single_chunk_cpu(args):
     frames_source, y_start, y_end, w, c, kappa, lp_method, lp_strength = args
@@ -461,7 +540,7 @@ def _process_single_chunk_cpu(args):
         del sub_stack
         return y_start, y_end, chunk_result
 
-    upper_tol = kappa + 0.8
+    # Rechazo estricto en CPU
     for ch in range(c):
         channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
         
@@ -470,8 +549,8 @@ def _process_single_chunk_cpu(args):
         mad = np.median(abs_diff, axis=0)
         sigma = 1.4826 * mad + 1e-6
 
-        low = med - 0.4 * sigma
-        high = med + upper_tol * sigma
+        low = med - kappa * sigma
+        high = med + kappa * sigma
 
         valid = (channel_data >= low) & (channel_data <= high)
         
@@ -489,7 +568,7 @@ def _process_single_chunk_cpu(args):
     return y_start, y_end, chunk_result
 
 
-def parallel_stream_stack(
+def stream_stack_auto(
     frames_source: list, 
     shape: tuple, 
     chunk_rows: int = 200, 
@@ -498,9 +577,12 @@ def parallel_stream_stack(
     lp_method: str = "standard",
     lp_strength: float = 0.5
 ) -> np.ndarray:
+    """
+    Motor canónico de integración matemática mediante franjas (chunks) 
+    y paralelización multi-hilo en CPU.
+    """
     h, w, c = shape
     stacked_out = np.zeros((h, w, c), dtype=np.float32)
-    is_ram_mode = isinstance(frames_source[0], np.ndarray)
 
     tasks = []
     for y in range(0, h, chunk_rows):
@@ -510,111 +592,9 @@ def parallel_stream_stack(
     if max_workers is None:
         max_workers = max(1, min(4, (os.cpu_count() or 4) - 1))
 
-    if is_ram_mode:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for y_start, y_end, chunk_data in executor.map(_process_single_chunk_cpu, tasks):
-                stacked_out[y_start:y_end, :, :] = chunk_data
-    else:
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-            for y_start, y_end, chunk_data in executor.map(_process_single_chunk_cpu, tasks):
-                stacked_out[y_start:y_end, :, :] = chunk_data
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for y_start, y_end, chunk_data in executor.map(_process_single_chunk_cpu, tasks):
+            stacked_out[y_start:y_end, :, :] = chunk_data
 
     gc.collect()
     return stacked_out
-
-
-def stream_stack_auto(
-    frames_source: list, 
-    shape: tuple, 
-    chunk_rows: int = 200, 
-    kappa: float = 2.2,
-    lp_method: str = "standard",
-    lp_strength: float = 0.5,
-    use_gpu: bool = None
-) -> np.ndarray:
-    h, w, c = shape
-    n_frames = len(frames_source)
-    is_ram_mode = isinstance(frames_source[0], np.ndarray)
-
-    if use_gpu is None:
-        use_gpu = is_gpu_enabled()
-
-    if use_gpu and HAS_GPU:
-        try:
-            stacked_out = np.zeros((h, w, c), dtype=np.float32)
-            bytes_per_row = w * c * 4
-
-            for y in range(0, h, chunk_rows):
-                y_end = min(y + chunk_rows, h)
-                actual_rows = y_end - y
-
-                if is_ram_mode:
-                    sub_stack = np.empty((n_frames, actual_rows, w, c), dtype=np.float32)
-                    for i in range(n_frames):
-                        sub_stack[i] = frames_source[i][y:y_end]
-                else:
-                    offset = y * bytes_per_row
-                    current_read_bytes = actual_rows * bytes_per_row
-                    block_frames = []
-                    for f in frames_source:
-                        with open(f, "rb") as fp:
-                            fp.seek(offset)
-                            raw_bytes = fp.read(current_read_bytes)
-                            frame_chunk = np.frombuffer(raw_bytes, dtype=np.float32).reshape((actual_rows, w, c))
-                            block_frames.append(frame_chunk)
-                    sub_stack = np.stack(block_frames, axis=0)
-                    del block_frames
-
-                stacked_out[y:y_end, :, :] = _process_chunk_gpu(
-                    sub_stack, 
-                    kappa=kappa, 
-                    lp_method=lp_method, 
-                    lp_strength=lp_strength
-                )
-                del sub_stack
-
-            return stacked_out
-        except Exception as exc:
-            print(f"[CuPy Fallback]: {exc}")
-            if HAS_GPU:
-                try:
-                    cp.get_default_memory_pool().free_all_blocks()
-                except Exception:
-                    pass
-
-    return parallel_stream_stack(
-        frames_source, 
-        shape, 
-        chunk_rows=chunk_rows, 
-        kappa=kappa,
-        lp_method=lp_method,
-        lp_strength=lp_strength
-    )
-    
-def get_image_dimensions(filepath: str) -> tuple[int, int]:
-    """
-    Obtiene (alto, ancho) de forma rápida. Para RAW lee los metadatos
-    respetando la orientación de usuario sin procesar la matriz completa.
-    """
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext in ['.nef', '.cr2', '.cr3', '.arw', '.dng', '.raw']:
-        import rawpy
-        with rawpy.imread(filepath) as raw:
-            # Obtener dimensiones efectivas teniendo en cuenta user_flip si aplica
-            # o haciendo un postprocess mínimo/rápido de 1/16 si fuera necesario:
-            h, w = raw.sizes.height, raw.sizes.width
-            # Si rawpy rota según EXIF, los flips 5, 6, 7, 8 transponen dimensiones
-            if raw.sizes.flip in [5, 6, 7, 8]:
-                return w, h
-            return h, w
-    else:
-        import cv2
-        # Carga rápida solo de cabeceras en formatos estándar
-        info = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
-        if info is not None:
-            return info.shape[0], info.shape[1]
-    
-    # Fallback si no se puede leer por cabecera
-    img = load_image_as_float32(filepath)
-    return img.shape[0], img.shape[1]

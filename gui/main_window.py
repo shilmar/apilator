@@ -14,7 +14,7 @@ from gui.tab_settings import SettingsTab
 class MainWindow(QMainWindow):
     """Ventana principal de la interfaz gráfica de Apilator."""
 
-    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.5.11)"
+    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.5.12)"
 
     def __init__(self):
         super().__init__()
