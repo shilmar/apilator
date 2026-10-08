@@ -8,13 +8,14 @@ from PySide6.QtWidgets import QMainWindow, QTabWidget
 
 from gui.tab_stacker import StackerTab
 from gui.tab_developer import DeveloperTab
+from gui.tab_eclipse import EclipseTab
 from gui.tab_settings import SettingsTab
 
 
 class MainWindow(QMainWindow):
     """Ventana principal de la interfaz gráfica de Apilator."""
 
-    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.5.12)"
+    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.6.0)"
 
     def __init__(self):
         super().__init__()
@@ -30,11 +31,13 @@ class MainWindow(QMainWindow):
         # Instanciar pestañas del flujo de trabajo
         self.tab_stacker = StackerTab()
         self.tab_developer = DeveloperTab()
+        self.tab_eclipse = EclipseTab()
         self.tab_settings = SettingsTab()
 
         self.tab_widget.addTab(self.tab_stacker, "1. Apilador (Stacker)")
         self.tab_widget.addTab(self.tab_developer, "2. Revelador / Editor")
-        self.tab_widget.addTab(self.tab_settings, "3. Configuración / Ajustes")
+        self.tab_widget.addTab(self.tab_eclipse, "3. Eclipses (Solar / Lunar)")
+        self.tab_widget.addTab(self.tab_settings, "4. Configuración / Ajustes")
 
         self.setCentralWidget(self.tab_widget)
 
@@ -46,6 +49,9 @@ class MainWindow(QMainWindow):
 
         # 3. Actualización dinámica del título según la sesión activa
         self.tab_stacker.session_title_changed.connect(self._update_window_title)
+
+        # 4. Transferencia de imagen desde el módulo de Eclipses al Revelador
+        self.tab_eclipse.export_to_developer.connect(self._on_eclipse_exported)
 
     def _update_window_title(self, session_name: str) -> None:
         """Actualiza el texto de la barra de título con el archivo de proyecto activo."""
@@ -62,3 +68,11 @@ class MainWindow(QMainWindow):
         final_mask = mask if mask is not None else getattr(self.tab_stacker, "computed_mask", None)
         self.tab_developer.load_image_direct(output_path, mask=final_mask)
         self.tab_widget.setCurrentIndex(1)
+
+    def _on_eclipse_exported(self, output_path: str) -> None:
+        """
+        Transfiere la imagen 32-bit generada en el módulo de Eclipses directamente
+        al Revelador / Editor y conmuta automáticamente a la pestaña 2.
+        """
+        self.tab_developer.load_image_direct(output_path, mask=None)
+        self.tab_widget.setCurrentIndex(1)

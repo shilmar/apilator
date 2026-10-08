@@ -1,6 +1,6 @@
 # Apilator
 
-**Apilator** es una herramienta especializada de posprocesado y apilado para **astrofotografía de paisaje (nightscapes)**. Permite desacoplar el movimiento del cielo respecto al horizonte terrestre, aplicar integración estadística Kappa-Sigma en coma flotante de 32 bits y editar la imagen final en tiempo real con asistencia de redes neuronales (GraXpert y StarNet++ v2).
+**Apilator** es una herramienta especializada de posprocesado, apilado y revelado para **astrofotografía de paisaje (nightscapes)** y **eclipses (solares y lunares)**. Permite desacoplar el movimiento del cielo respecto al horizonte terrestre, aplicar integración estadística Kappa-Sigma en coma flotante de 32 bits, procesar series de bracketing de eclipses con alineación subpíxel de limbo y filtro NRGF continuo, y editar la imagen final en tiempo real con asistencia de redes neuronales (GraXpert y StarNet++ v2).
 
 ---
 
@@ -34,7 +34,19 @@
 - **Reducción de Ruido Adaptativa:** Múltiples métodos para el fondo (Filtro Bilateral, Filtro Guiado y Non-Local Means) respetando los límites de las estrellas.
 - **Balance de Color Fino y Tonalidad:** Curvas interactivas con histograma integrado en tiempo real, balance de temperatura/tinte calibrado ($\pm0.250$), control de vibranza y saturación diferencial cielo/suelo.
 
-### 5. Configuración y Rendimiento
+### 5. Módulo Especializado de Eclipses (Solar / Lunar)
+- **Ingesta Automática de Bracketing y Metadatos:** Carga de series de exposición completa (RAW, TIFF, FITS) con extracción de tiempos de obturación reales, ISO y apertura, ordenando automáticamente las tomas.
+- **Detección Subpíxel de Limbo Inmune a Protuberancias:** Algoritmo por flujo de gradiente radial perpendicular (`optimize_center_circular_flux`) basado en la mediana de 360 rayos angulares, insensible a protuberancias cromosféricas, fulguraciones o cuentas de Baily, ubicando el centro real con precisión < 0.1 píxeles.
+- **Alineación de Lotes con Radio Físico Anclado:** Detección en lote que fija el radio astronómico real de la toma de referencia para toda la serie y ajusta los desplazamientos afines con interpolación Lanczos4.
+- **Fusión Fotométrica HDR Lineal (32-bit):** Ponderación por tiempos reales de exposición con corte suave de saturación y estirado no lineal Asinh para revelar desde la cromosfera y protuberancias hasta la corona externa tenue.
+- **Filtro NRGF (Normalized Radial Gradient Filter) Continuo:**
+  - Interpolación continua subpíxel (`np.interp`) sin discretización de radios, eliminando por completo cualquier artefacto de bandas concéntricas.
+  - Modulación dinámica desinhibida para estirar y contrastar filamentos coronales ("hilos") hasta 3.5x–4.0x radios solares.
+  - Compuerta radial suave (*Radial Gate*) que transiciona gradualmente al cielo de fondo profundo para mantenerlo negro aterciopelado sin ruido.
+  - Filtro bilateral tangencial de alta frecuencia para realce selectivo de líneas de campo magnético solar.
+- **Exportación Dual 16-bit / 32-bit:** Exportación directa a TIFF de 16 bits optimizada (`uint16`, zlib, `photometric='rgb'`) compatible de forma nativa con Photoshop y Lightroom sin mapeos forzados de tono, y TIFF de 32 bits flotante para archivo maestro.
+
+### 6. Configuración y Rendimiento
 - **Aceleración por GPU Dual:** Soporte automático para NVIDIA CUDA mediante CuPy y conmutación transparente a CPU multinúcleo en equipos sin GPU dedicada.
 - **Estrategias de Memoria Configurables:** Modos automático, memoria RAM intermedia de alta velocidad o volcado temporal a disco SSD para equipos con recursos limitados.
 - **Detección Automática de Binarios:** Localización y validación de ejecutables externos de StarNet++ CLI y GraXpert.
@@ -49,6 +61,7 @@ apilator/
 ├── run_app.py               # Punto de entrada de la aplicación
 ├── core/
 │   ├── config_manager.py    # Carga y almacenamiento de ajustes JSON
+│   ├── eclipse.py           # Detección de limbo, alineación subpíxel, fusión HDR y NRGF continuo
 │   ├── gpu_backend.py       # Detección y gestión de aceleración NVIDIA CUDA / CuPy
 │   ├── graxpert_bridge.py   # Conector CLI con GraXpert AI
 │   ├── masking.py           # Algoritmos de segmentación y refinado guiado de máscaras
@@ -60,6 +73,7 @@ apilator/
     ├── canvas.py            # Visor interactivo QGraphicsView acelerado con zoom 1:1
     ├── main_window.py       # Ventana principal y gestión de pestañas maestras
     ├── tab_developer.py     # Pestaña de revelado y composición de capas
+    ├── tab_eclipse.py       # Pestaña de procesado integral de eclipses solares y lunares
     ├── tab_settings.py      # Pestaña de configuración de rutas y parámetros
     ├── tab_stacker.py       # Pestaña de apilado dual, calibración y máscaras
     └── worker.py            # Orquestador de tareas en segundo plano multihilo (QThread)
@@ -111,7 +125,7 @@ python run_app.py
 
 ## Flujo de Trabajo Recomendado
 ### 1. Flujo de Calibración y Apilado
-* Abre la pestaña 1. Apilador (Stacker).
+* Abre la pestaña **1. Apilador (Stacker)**.
 * Carga tus tomas de luz en Lights y haz doble clic sobre la toma que servirá como base de encuadre.
 * (Opcional) Carga tomas en Darks, Flats y Bias para corrección de ruido térmico, viñeteo óptico y offset.
 * Dibuja los trazos guía sobre la vista previa: Verde para el cielo y Rojo para el suelo.
@@ -120,12 +134,22 @@ python run_app.py
 * Pulsa INICIAR APILADO DUAL.
 
 ### 2. Flujo de Revelado
-* Al concluir el apilado, la imagen lineal de 32 bits y su máscara calculada se cargarán automáticamente en la pestaña 2. Revelador / Editor.
+* Al concluir el apilado, la imagen lineal de 32 bits y su máscara calculada se cargarán automáticamente en la pestaña **2. Revelador / Editor**.
 * Neutraliza gradientes residuales con el motor Polinómico o GraXpert AI.
 * Ejecuta StarNet++ para separar el fondo galáctico de las estrellas.
 * Aplica realce de gas y polvo molecular mediante los controles de Estructura Multiescala (Ondículas) sin deformar el perfil estelar.
 * Ajusta curvas, temperatura de color, tinte y saturación diferencial cielo/suelo.
 * Exporta el resultado final en formato TIFF 16-bit, TIFF 32-bit float o JPEG.
+
+### 3. Flujo de Procesado de Eclipses (Solar / Lunar)
+* Abre la pestaña **3. Eclipses (Solar / Lunar)**.
+* Selecciona la modalidad deseada con el conmutador interactivo (**Solar** o **Lunar**).
+* Pulsa **Cargar Serie de Bracketing** para importar todas las exposiciones (RAW, TIFF o FITS). El sistema leerá automáticamente tiempos de obturación e ISO y ordenará las tomas de menor a mayor exposición.
+* Haz doble clic sobre una toma con buena definición del limbo para fijarla como referencia.
+* Pulsa **Detectar Limbo en Todo el Lote**: el sistema detectará el centro y radio físico en la referencia y optimizará el centro subpíxel (`< 0.1 px`) en cada fotograma del lote manteniendo el radio anclado.
+* Pulsa **Alinear y Fusionar Bracketing (HDR)** para generar el compuesto lineal de 32 bits con compresión Asinh.
+* Ajusta los parámetros del filtro **NRGF**: alcance de la corona (por defecto 3.5x), mezcla de filamentos (50%) y filtro tangencial para estirar y contrastar los filamentos coronales sin quemar las protuberancias.
+* Pulsa **Guardar TIFF 16-bit** para abrir directamente en Photoshop/Lightroom sin cuadros de diálogo de mapeo de tono, **Guardar TIFF 32-bit** para procesado HDR de alta fidelidad, o envíalo directamente al **Revelador / Editor**.
 
 ## Hoja de Ruta
 [x] Apilado diferencial cielo/suelo con alineación estelar por homografía.
@@ -136,8 +160,8 @@ python run_app.py
 [x] Segmentación asistida GrabCut y zoom nativo 1:1.
 [x] Descomposición y realce multiescala mediante ondículas À Trous.
 [x] Integración de StarNet++ v2 y GraXpert AI.
+[x] Rutina específica de apilado y alineación para eclipses solares y lunares (Módulo Eclipses con NRGF continuo y detección subpíxel).
 [ ] Procesado por lotes para secuencias de timelapse.
-[ ] Rutina específica de apilado y alineación para eclipses solares.
 [ ] Módulo de composición panorámica para mosaicos nocturnos.
 [ ] Exportación de perfiles de color ICC embebidos (sRGB / AdobeRGB / ProPhoto).
 ---
