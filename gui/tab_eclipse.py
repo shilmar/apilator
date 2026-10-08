@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal, QThread, QPoint, QPointF, QRectF
-from PySide6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QCursor, QFont
+from PySide6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QCursor, QFont, QTextCursor
 
 from core.eclipse import (
     extract_exposure_info,
@@ -516,16 +516,23 @@ class EclipseTab(QWidget):
         splitter.setChildrenCollapsible(False)
 
         # -------------------------------------------------------------
-        # 1. PANEL DE CONTROL IZQUIERDO (Scrollable)
+        # 1. PANEL DE CONTROL IZQUIERDO (Scrollable con Log Fijo Abajo)
         # -------------------------------------------------------------
+        left_panel = QWidget()
+        left_panel.setMinimumWidth(410)
+        left_panel.setMaximumWidth(500)
+        left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(8, 8, 8, 8)
+        left_panel_layout.setSpacing(6)
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setMinimumWidth(410)
-        scroll_area.setMaximumWidth(500)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         panel_content = QWidget()
         left_layout = QVBoxLayout(panel_content)
-        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setContentsMargins(2, 2, 8, 2)
         left_layout.setSpacing(10)
 
         # MODALIDAD DE ECLIPSE: Selector Compacto Boolean Toggle (Sol / Luna)
@@ -779,19 +786,44 @@ class EclipseTab(QWidget):
 
         left_layout.addWidget(grp_export)
 
-        # Consola de estado y Progreso
+        scroll_area.setWidget(panel_content)
+        left_panel_layout.addWidget(scroll_area, stretch=1)
+
+        # Consola de estado y Progreso fija abajo (siempre visible, sin scroll)
         self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #333333;
+                border-radius: 3px;
+                text-align: center;
+                font-size: 10px;
+                background-color: #1a1a1a;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #0288d1;
+            }
+        """)
         self.progress_bar.setVisible(False)
-        left_layout.addWidget(self.progress_bar)
+        left_panel_layout.addWidget(self.progress_bar)
+
+        lbl_log = QLabel("Registro de Actividad:")
+        lbl_log.setStyleSheet("color: #a0a0a0; font-size: 11px; font-weight: bold;")
+        left_panel_layout.addWidget(lbl_log)
 
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setMaximumHeight(90)
-        self.txt_log.setStyleSheet("background-color: #121215; color: #a5d6a7; font-family: monospace; font-size: 11px;")
-        left_layout.addWidget(self.txt_log)
+        self.txt_log.setFixedHeight(100)
+        self.txt_log.setStyleSheet(
+            "background-color: #141414; color: #a5d6a7; "
+            "font-family: Consolas, monospace; font-size: 11px; "
+            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
+        )
+        left_panel_layout.addWidget(self.txt_log)
 
-        scroll_area.setWidget(panel_content)
-        splitter.addWidget(scroll_area)
+        splitter.addWidget(left_panel)
 
         # -------------------------------------------------------------
         # 2. PANEL DERECHO: Canvas Interactivo
@@ -823,6 +855,7 @@ class EclipseTab(QWidget):
 
     def log(self, message: str):
         self.txt_log.append(f"• {message}")
+        self.txt_log.moveCursor(QTextCursor.End)
         self.lbl_canvas_status.setText(message)
 
     # -------------------------------------------------------------
