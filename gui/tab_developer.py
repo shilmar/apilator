@@ -109,62 +109,262 @@ class DeveloperTab(QWidget):
         # 2. Panel interno de controles
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.setSpacing(6)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(12)
 
         # Carga externa
-        self.btn_open_img = QPushButton("Abrir Imagen (TIFF / FITS / RAW)...")
+        self.btn_open_img = QPushButton("📁 Abrir Imagen (TIFF / FITS / RAW)...")
         self.btn_open_img.setStyleSheet("font-weight: bold; padding: 6px;")
         self.btn_open_img.clicked.connect(self.open_image_file)
         left_layout.addWidget(self.btn_open_img)
 
-        # --- Extracción de Fondo y Gradientes ---
-        grp_bg = QGroupBox("Extracción de Fondo y Gradientes")
+        # --- SECCIÓN 1: Extracción de Fondo y Polución Lumínica (Fusión 3.3) ---
+        grp_bg = QGroupBox("1. Fondo y Polución Lumínica")
         layout_bg = QVBoxLayout(grp_bg)
+        layout_bg.setContentsMargins(10, 14, 10, 10)
+        layout_bg.setSpacing(8)
 
         row_engine = QHBoxLayout()
         row_engine.addWidget(QLabel("Motor:"))
         self.combo_bg_engine = QComboBox()
         self.combo_bg_engine.addItems(["Polinómico (Paisaje)", "GraXpert AI"])
         row_engine.addWidget(self.combo_bg_engine)
-        layout_bg.addLayout(row_engine)
 
-        row_grax = QHBoxLayout()
         self.lbl_smoothing = QLabel("Suavizado:")
-        row_grax.addWidget(self.lbl_smoothing)
+        row_engine.addWidget(self.lbl_smoothing)
         self.spin_smoothing = QDoubleSpinBox()
         self.spin_smoothing.setRange(0.1, 1.0)
         self.spin_smoothing.setSingleStep(0.05)
         self.spin_smoothing.setValue(0.50)
-        row_grax.addWidget(self.spin_smoothing)
+        self.spin_smoothing.setFixedWidth(65)
+        row_engine.addWidget(self.spin_smoothing)
+        layout_bg.addLayout(row_engine)
 
-        self.btn_extract_bg = QPushButton("Eliminar Gradientes")
+        self.btn_extract_bg = QPushButton("⚡ Eliminar Gradientes")
+        self.btn_extract_bg.setStyleSheet("font-weight: bold;")
         self.btn_extract_bg.clicked.connect(self.on_extract_background_clicked)
-        row_grax.addWidget(self.btn_extract_bg)
-        layout_bg.addLayout(row_grax)
+        layout_bg.addWidget(self.btn_extract_bg)
 
-        left_layout.addWidget(grp_bg)
-
-        # Atenuación de Contaminación Lumínica
-        grp_lp = QGroupBox("Contaminación Lumínica")
-        layout_lp = QVBoxLayout(grp_lp)
+        # Cúpula de luz (Contaminación Lumínica) integrada
         row_lp = QHBoxLayout()
         row_lp.addWidget(QLabel("Atenuar Cúpula de Luz:"))
         self.lbl_lp = QLabel("0%")
+        self.lbl_lp.setStyleSheet("color: #ffd54f; font-weight: bold;")
         row_lp.addWidget(self.lbl_lp)
-        layout_lp.addLayout(row_lp)
+        layout_bg.addLayout(row_lp)
 
         self.slider_lp = QSlider(Qt.Horizontal)
         self.slider_lp.setRange(0, 100)
         self.slider_lp.setValue(0)
         self.slider_lp.valueChanged.connect(self.on_lp_changed)
-        layout_lp.addWidget(self.slider_lp)
-        left_layout.addWidget(grp_lp)
+        layout_bg.addWidget(self.slider_lp)
 
-        # --- SUITE STARNET++ AI Y PROCESADO DE CAPAS ---
-        grp_starnet = QGroupBox("StarNet++ AI — Desacoplo y Procesado de Capas")
+        left_layout.addWidget(grp_bg)
+
+        # --- SECCIÓN 2: Estirado Tonal y Curvas (Histograma) ---
+        grp_stretch = QGroupBox("2. Estirado Tonal y Curvas (Histograma)")
+        stretch_layout = QVBoxLayout(grp_stretch)
+        stretch_layout.setContentsMargins(10, 14, 10, 10)
+        stretch_layout.setSpacing(8)
+
+        btn_row_mtf = QHBoxLayout()
+        btn_auto_mtf = QPushButton("⚡ Auto-Estirado MTF")
+        btn_auto_mtf.setStyleSheet("font-weight: bold; color: #80d8ff;")
+        btn_auto_mtf.clicked.connect(self.apply_auto_mtf)
+        btn_reset_tone = QPushButton("Restablecer Tono")
+        btn_reset_tone.clicked.connect(self.reset_sliders)
+        btn_row_mtf.addWidget(btn_auto_mtf)
+        btn_row_mtf.addWidget(btn_reset_tone)
+        stretch_layout.addLayout(btn_row_mtf)
+
+        # Emparejamiento 3.2: Punto Negro (izq) y Medios Tonos (der)
+        row_spins = QHBoxLayout()
+        row_spins.setSpacing(14)
+
+        col_bp_lbl = QHBoxLayout()
+        col_bp_lbl.addWidget(QLabel("P. Negro:"))
+        self.spin_bp = QDoubleSpinBox()
+        self.spin_bp.setDecimals(5)
+        self.spin_bp.setRange(0.0, 0.20000)
+        self.spin_bp.setSingleStep(0.00010)
+        self.spin_bp.setValue(0.0)
+        self.spin_bp.valueChanged.connect(self.on_spin_bp_changed)
+        col_bp_lbl.addWidget(self.spin_bp)
+        row_spins.addLayout(col_bp_lbl)
+
+        col_mtf_lbl = QHBoxLayout()
+        col_mtf_lbl.addWidget(QLabel("Medios (m):"))
+        self.spin_mtf = QDoubleSpinBox()
+        self.spin_mtf.setDecimals(5)
+        self.spin_mtf.setRange(0.00010, 0.50000)
+        self.spin_mtf.setSingleStep(0.00050)
+        self.spin_mtf.setValue(0.10000)
+        self.spin_mtf.valueChanged.connect(self.on_spin_mtf_changed)
+        col_mtf_lbl.addWidget(self.spin_mtf)
+        row_spins.addLayout(col_mtf_lbl)
+        stretch_layout.addLayout(row_spins)
+
+        row_sliders = QHBoxLayout()
+        row_sliders.setSpacing(14)
+        self.slider_bp = QSlider(Qt.Horizontal)
+        self.slider_bp.setRange(0, 2000)
+        self.slider_bp.setValue(0)
+        self.slider_bp.valueChanged.connect(self.on_slider_bp_changed)
+        row_sliders.addWidget(self.slider_bp)
+
+        self.slider_mtf = QSlider(Qt.Horizontal)
+        self.slider_mtf.setRange(1, 2000)
+        self.slider_mtf.setValue(400)
+        self.slider_mtf.valueChanged.connect(self.on_slider_mtf_changed)
+        row_sliders.addWidget(self.slider_mtf)
+        stretch_layout.addLayout(row_sliders)
+
+        row_cnt = QHBoxLayout()
+        row_cnt.addWidget(QLabel("Contraste:"))
+        self.lbl_contrast = QLabel("0.00")
+        self.lbl_contrast.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        row_cnt.addWidget(self.lbl_contrast)
+        row_cnt.addSpacing(10)
+        self.slider_contrast = QSlider(Qt.Horizontal)
+        self.slider_contrast.setRange(-100, 100)
+        self.slider_contrast.setValue(0)
+        self.slider_contrast.valueChanged.connect(self.on_contrast_changed)
+        row_cnt.addWidget(self.slider_contrast, stretch=1)
+        stretch_layout.addLayout(row_cnt)
+
+        # Curva de Tono con Histograma
+        self.curve_widget = CurveWidget()
+        self.curve_widget.curveChanged.connect(self.update_stretch_preview)
+        stretch_layout.addWidget(self.curve_widget)
+
+        row_crv_btn = QHBoxLayout()
+        self.btn_reset_curve = QPushButton("Resetear Curva")
+        self.btn_reset_curve.setStyleSheet("font-size: 11px; padding: 2px;")
+        self.btn_reset_curve.clicked.connect(self.curve_widget.reset_curve)
+        row_crv_btn.addWidget(self.btn_reset_curve)
+        stretch_layout.addLayout(row_crv_btn)
+
+        left_layout.addWidget(grp_stretch)
+
+        # --- SECCIÓN 3: Balance de Blancos ---
+        grp_wb = QGroupBox("3. Balance de Blancos (Precisión Fina)")
+        wb_layout = QVBoxLayout(grp_wb)
+        wb_layout.setContentsMargins(10, 14, 10, 10)
+        wb_layout.setSpacing(8)
+
+        # Emparejamiento 3.2: Temp (izq) y Tinte (der) en 2 columnas
+        row_wb = QHBoxLayout()
+        row_wb.setSpacing(14)
+
+        col_temp = QVBoxLayout()
+        col_temp.setSpacing(4)
+        row_temp_lbl = QHBoxLayout()
+        row_temp_lbl.addWidget(QLabel("Temp:"))
+        self.lbl_temp_val = QLabel("0.000")
+        self.lbl_temp_val.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        row_temp_lbl.addWidget(self.lbl_temp_val)
+        col_temp.addLayout(row_temp_lbl)
+
+        self.slider_temp = QSlider(Qt.Horizontal)
+        self.slider_temp.setRange(-250, 250)
+        self.slider_temp.setValue(0)
+        self.slider_temp.valueChanged.connect(self.on_temp_changed)
+        col_temp.addWidget(self.slider_temp)
+        row_wb.addLayout(col_temp)
+
+        col_tint = QVBoxLayout()
+        col_tint.setSpacing(4)
+        row_tint_lbl = QHBoxLayout()
+        row_tint_lbl.addWidget(QLabel("Tinte:"))
+        self.lbl_tint_val = QLabel("0.000")
+        self.lbl_tint_val.setStyleSheet("color: #b388ff; font-weight: bold;")
+        row_tint_lbl.addWidget(self.lbl_tint_val)
+        col_tint.addLayout(row_tint_lbl)
+
+        self.slider_tint = QSlider(Qt.Horizontal)
+        self.slider_tint.setRange(-250, 250)
+        self.slider_tint.setValue(0)
+        self.slider_tint.valueChanged.connect(self.on_tint_changed)
+        col_tint.addWidget(self.slider_tint)
+        row_wb.addLayout(col_tint)
+
+        wb_layout.addLayout(row_wb)
+
+        btn_reset_wb = QPushButton("Restablecer Balance")
+        btn_reset_wb.clicked.connect(self.reset_wb)
+        wb_layout.addWidget(btn_reset_wb)
+        left_layout.addWidget(grp_wb)
+
+        # --- SECCIÓN 4: Color: Saturación e Intensidad ---
+        grp_sat = QGroupBox("4. Color: Saturación e Intensidad")
+        sat_layout = QVBoxLayout(grp_sat)
+        sat_layout.setContentsMargins(10, 14, 10, 10)
+        sat_layout.setSpacing(8)
+
+        # Emparejamiento 3.2: Saturación Cielo (izq) y Suelo (der) en 2 columnas
+        row_sat_dual = QHBoxLayout()
+        row_sat_dual.setSpacing(14)
+
+        col_sky = QVBoxLayout()
+        col_sky.setSpacing(4)
+        row_sky_lbl = QHBoxLayout()
+        row_sky_lbl.addWidget(QLabel("Sat. Cielo:"))
+        self.lbl_sat_sky = QLabel("1.00x")
+        self.lbl_sat_sky.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_sky_lbl.addWidget(self.lbl_sat_sky)
+        col_sky.addLayout(row_sky_lbl)
+
+        self.slider_sat_sky = QSlider(Qt.Horizontal)
+        self.slider_sat_sky.setRange(0, 250)
+        self.slider_sat_sky.setValue(100)
+        self.slider_sat_sky.valueChanged.connect(self.on_sat_sky_changed)
+        col_sky.addWidget(self.slider_sat_sky)
+        row_sat_dual.addLayout(col_sky)
+
+        col_gnd = QVBoxLayout()
+        col_gnd.setSpacing(4)
+        row_gnd_lbl = QHBoxLayout()
+        row_gnd_lbl.addWidget(QLabel("Sat. Suelo:"))
+        self.lbl_sat_gnd = QLabel("1.00x")
+        self.lbl_sat_gnd.setStyleSheet("color: #a5d6a7; font-weight: bold;")
+        row_gnd_lbl.addWidget(self.lbl_sat_gnd)
+        col_gnd.addLayout(row_gnd_lbl)
+
+        self.slider_sat_gnd = QSlider(Qt.Horizontal)
+        self.slider_sat_gnd.setRange(0, 250)
+        self.slider_sat_gnd.setValue(100)
+        self.slider_sat_gnd.valueChanged.connect(self.on_sat_gnd_changed)
+        col_gnd.addWidget(self.slider_sat_gnd)
+        row_sat_dual.addLayout(col_gnd)
+
+        sat_layout.addLayout(row_sat_dual)
+
+        # Vibrance y Reset en una fila compacta
+        row_vib = QHBoxLayout()
+        row_vib.addWidget(QLabel("Vibranza:"))
+        self.lbl_vibrance = QLabel("0.00")
+        self.lbl_vibrance.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        row_vib.addWidget(self.lbl_vibrance)
+        row_vib.addSpacing(6)
+        self.slider_vibrance = QSlider(Qt.Horizontal)
+        self.slider_vibrance.setRange(-100, 100)
+        self.slider_vibrance.setValue(0)
+        self.slider_vibrance.valueChanged.connect(self.on_vibrance_changed)
+        row_vib.addWidget(self.slider_vibrance, stretch=1)
+
+        btn_reset_sat = QPushButton("Restablecer")
+        btn_reset_sat.setToolTip("Restablecer Saturación y Vibranza")
+        btn_reset_sat.clicked.connect(self.reset_saturation)
+        row_vib.addWidget(btn_reset_sat)
+        sat_layout.addLayout(row_vib)
+
+        left_layout.addWidget(grp_sat)
+
+        # --- SECCIÓN 5: StarNet++ AI y Procesado de Capas ---
+        grp_starnet = QGroupBox("5. StarNet++ AI — Desacoplo y Procesado de Capas")
         layout_starnet = QVBoxLayout(grp_starnet)
-        layout_starnet.setSpacing(6)
+        layout_starnet.setContentsMargins(10, 14, 10, 10)
+        layout_starnet.setSpacing(8)
 
         # 1. Disparador de Ejecución
         row_sn = QHBoxLayout()
@@ -173,10 +373,11 @@ class DeveloperTab(QWidget):
         self.spin_stride.setRange(64, 512)
         self.spin_stride.setSingleStep(64)
         self.spin_stride.setValue(256)
+        self.spin_stride.setFixedWidth(65)
         row_sn.addWidget(self.spin_stride)
 
-        self.btn_starnet = QPushButton("Separar Estrellas con StarNet")
-        self.btn_starnet.setStyleSheet("font-weight: bold;")
+        self.btn_starnet = QPushButton("✨ Separar Estrellas con StarNet")
+        self.btn_starnet.setStyleSheet("font-weight: bold; color: #b388ff;")
         self.btn_starnet.clicked.connect(self.run_starnet)
         row_sn.addWidget(self.btn_starnet)
         layout_starnet.addLayout(row_sn)
@@ -184,14 +385,8 @@ class DeveloperTab(QWidget):
         # 2. Contenedor de herramientas dependientes (desactivado por defecto)
         self.container_starnet_tools = QWidget()
         tools_layout = QVBoxLayout(self.container_starnet_tools)
-        tools_layout.setContentsMargins(0, 4, 0, 0)
-        tools_layout.setSpacing(6)
-
-        # Separador visual
-        sep_sn = QFrame()
-        sep_sn.setFrameShape(QFrame.HLine)
-        sep_sn.setFrameShadow(QFrame.Sunken)
-        tools_layout.addWidget(sep_sn)
+        tools_layout.setContentsMargins(0, 6, 0, 0)
+        tools_layout.setSpacing(8)
 
         # Capas y Estrellas
         row_view = QHBoxLayout()
@@ -200,13 +395,13 @@ class DeveloperTab(QWidget):
         self.combo_layer.addItems(["Compuesta (Normal)", "Solo Fondo (Starless)", "Solo Estrellas"])
         self.combo_layer.currentIndexChanged.connect(self.on_layer_mode_changed)
         row_view.addWidget(self.combo_layer)
-        tools_layout.addLayout(row_view)
 
-        row_stars = QHBoxLayout()
-        row_stars.addWidget(QLabel("Intensidad Estrellas:"))
+        row_view.addSpacing(10)
+        row_view.addWidget(QLabel("Estrellas:"))
         self.lbl_stars = QLabel("100%")
-        row_stars.addWidget(self.lbl_stars)
-        tools_layout.addLayout(row_stars)
+        self.lbl_stars.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        row_view.addWidget(self.lbl_stars)
+        tools_layout.addLayout(row_view)
 
         self.slider_stars = QSlider(Qt.Horizontal)
         self.slider_stars.setRange(0, 200)
@@ -214,179 +409,168 @@ class DeveloperTab(QWidget):
         self.slider_stars.valueChanged.connect(self.on_stars_slider_changed)
         tools_layout.addWidget(self.slider_stars)
 
-        # Fondo: Contraste, Claridad y Neblina
-        row_cs = QHBoxLayout()
-        row_cs.addWidget(QLabel("Contraste Fondo (Starless):"))
-        self.lbl_contrast_starless = QLabel("0.00")
-        row_cs.addWidget(self.lbl_contrast_starless)
-        tools_layout.addLayout(row_cs)
+        # Emparejamiento 3.2 - Par 1: Claridad Fondo (izq) y Borrar Neblina (der)
+        row_pair1 = QHBoxLayout()
+        row_pair1.setSpacing(14)
 
-        self.slider_contrast_starless = QSlider(Qt.Horizontal)
-        self.slider_contrast_starless.setRange(-100, 100)
-        self.slider_contrast_starless.setValue(0)
-        self.slider_contrast_starless.valueChanged.connect(self.on_contrast_starless_changed)
-        tools_layout.addWidget(self.slider_contrast_starless)
-
-        row_clarity = QHBoxLayout()
-        row_clarity.addWidget(QLabel("Claridad Fondo:"))
+        col_clarity = QVBoxLayout()
+        col_clarity.setSpacing(4)
+        row_cl_lbl = QHBoxLayout()
+        row_cl_lbl.addWidget(QLabel("Claridad Fondo:"))
         self.lbl_clarity = QLabel("0.00")
-        row_clarity.addWidget(self.lbl_clarity)
-        tools_layout.addLayout(row_clarity)
-
+        self.lbl_clarity.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_cl_lbl.addWidget(self.lbl_clarity)
+        col_clarity.addLayout(row_cl_lbl)
         self.slider_clarity = QSlider(Qt.Horizontal)
         self.slider_clarity.setRange(-200, 200)
         self.slider_clarity.setValue(0)
         self.slider_clarity.valueChanged.connect(self.on_clarity_changed)
-        tools_layout.addWidget(self.slider_clarity)
+        col_clarity.addWidget(self.slider_clarity)
+        row_pair1.addLayout(col_clarity)
 
-        row_dehaze = QHBoxLayout()
-        row_dehaze.addWidget(QLabel("Borrar Neblina:"))
+        col_dehaze = QVBoxLayout()
+        col_dehaze.setSpacing(4)
+        row_dh_lbl = QHBoxLayout()
+        row_dh_lbl.addWidget(QLabel("Borrar Neblina:"))
         self.lbl_dehaze = QLabel("0.00")
-        row_dehaze.addWidget(self.lbl_dehaze)
-        tools_layout.addLayout(row_dehaze)
-
+        self.lbl_dehaze.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_dh_lbl.addWidget(self.lbl_dehaze)
+        col_dehaze.addLayout(row_dh_lbl)
         self.slider_dehaze = QSlider(Qt.Horizontal)
         self.slider_dehaze.setRange(-200, 200)
         self.slider_dehaze.setValue(0)
         self.slider_dehaze.valueChanged.connect(self.on_dehaze_changed)
-        tools_layout.addWidget(self.slider_dehaze)
+        col_dehaze.addWidget(self.slider_dehaze)
+        row_pair1.addLayout(col_dehaze)
+        tools_layout.addLayout(row_pair1)
 
-        # Ondículas
-        row_ond_est = QHBoxLayout()
-        row_ond_est.addWidget(QLabel("Estructura Galáctica (Ondículas):"))
+        # Emparejamiento 3.2 - Par 2: Estructura Ondículas (izq) y Atenuar Fondo (der)
+        row_pair2 = QHBoxLayout()
+        row_pair2.setSpacing(14)
+
+        col_ond = QVBoxLayout()
+        col_ond.setSpacing(4)
+        row_ond_lbl = QHBoxLayout()
+        row_ond_lbl.addWidget(QLabel("Estructura (Ondículas):"))
         self.lbl_ond_est = QLabel("0.00")
-        row_ond_est.addWidget(self.lbl_ond_est)
-        tools_layout.addLayout(row_ond_est)
-
+        self.lbl_ond_est.setStyleSheet("color: #b388ff; font-weight: bold;")
+        row_ond_lbl.addWidget(self.lbl_ond_est)
+        col_ond.addLayout(row_ond_lbl)
         self.slider_ond_est = QSlider(Qt.Horizontal)
         self.slider_ond_est.setRange(-100, 100)
         self.slider_ond_est.setValue(0)
         self.slider_ond_est.valueChanged.connect(self.on_ond_estructura_changed)
-        tools_layout.addWidget(self.slider_ond_est)
+        col_ond.addWidget(self.slider_ond_est)
+        row_pair2.addLayout(col_ond)
 
-        row_ond_bg = QHBoxLayout()
-        row_ond_bg.addWidget(QLabel("Atenuar Fondo Residual:"))
+        col_ond_bg = QVBoxLayout()
+        col_ond_bg.setSpacing(4)
+        row_ondbg_lbl = QHBoxLayout()
+        row_ondbg_lbl.addWidget(QLabel("Atenuar Fondo:"))
         self.lbl_ond_bg = QLabel("0%")
-        row_ond_bg.addWidget(self.lbl_ond_bg)
-        tools_layout.addLayout(row_ond_bg)
-
+        self.lbl_ond_bg.setStyleSheet("color: #b388ff; font-weight: bold;")
+        row_ondbg_lbl.addWidget(self.lbl_ond_bg)
+        col_ond_bg.addLayout(row_ondbg_lbl)
         self.slider_ond_bg = QSlider(Qt.Horizontal)
         self.slider_ond_bg.setRange(0, 100)
         self.slider_ond_bg.setValue(0)
         self.slider_ond_bg.valueChanged.connect(self.on_ond_fondo_changed)
-        tools_layout.addWidget(self.slider_ond_bg)
+        col_ond_bg.addWidget(self.slider_ond_bg)
+        row_pair2.addLayout(col_ond_bg)
+        tools_layout.addLayout(row_pair2)
 
-        # Reducción de Ruido
-        row_dn = QHBoxLayout()
-        row_dn.addWidget(QLabel("Reducción de Ruido (Fondo):"))
+        # Emparejamiento 3.2 - Par 3: Contraste Starless (izq) y Reducción de Ruido (der)
+        row_pair3 = QHBoxLayout()
+        row_pair3.setSpacing(14)
+
+        col_cs = QVBoxLayout()
+        col_cs.setSpacing(4)
+        row_cs_lbl = QHBoxLayout()
+        row_cs_lbl.addWidget(QLabel("Contraste Fondo:"))
+        self.lbl_contrast_starless = QLabel("0.00")
+        self.lbl_contrast_starless.setStyleSheet("color: #a5d6a7; font-weight: bold;")
+        row_cs_lbl.addWidget(self.lbl_contrast_starless)
+        col_cs.addLayout(row_cs_lbl)
+        self.slider_contrast_starless = QSlider(Qt.Horizontal)
+        self.slider_contrast_starless.setRange(-100, 100)
+        self.slider_contrast_starless.setValue(0)
+        self.slider_contrast_starless.valueChanged.connect(self.on_contrast_starless_changed)
+        col_cs.addWidget(self.slider_contrast_starless)
+        row_pair3.addLayout(col_cs)
+
+        col_dn = QVBoxLayout()
+        col_dn.setSpacing(4)
+        row_dn_lbl = QHBoxLayout()
+        row_dn_lbl.addWidget(QLabel("Reducción Ruido:"))
         self.lbl_denoise = QLabel("0%")
-        row_dn.addWidget(self.lbl_denoise)
-        tools_layout.addLayout(row_dn)
-
+        self.lbl_denoise.setStyleSheet("color: #a5d6a7; font-weight: bold;")
+        row_dn_lbl.addWidget(self.lbl_denoise)
+        col_dn.addLayout(row_dn_lbl)
         self.slider_denoise = QSlider(Qt.Horizontal)
         self.slider_denoise.setRange(0, 100)
         self.slider_denoise.setValue(0)
         self.slider_denoise.valueChanged.connect(self.on_denoise_changed)
-        tools_layout.addWidget(self.slider_denoise)
+        col_dn.addWidget(self.slider_denoise)
+        row_pair3.addLayout(col_dn)
+        tools_layout.addLayout(row_pair3)
 
-        # Integrar contenedor e inicializar apagado
         layout_starnet.addWidget(self.container_starnet_tools)
         left_layout.addWidget(grp_starnet)
         self._set_starnet_tools_enabled(False)
-        
-        # --- Curvas de Tono con Histograma ---
-        grp_curves = QGroupBox("Curvas de Tono (Fondo e Histograma)")
-        curves_layout = QVBoxLayout(grp_curves)
-        curves_layout.setContentsMargins(6, 6, 6, 6)
-        curves_layout.setSpacing(4)
 
-        self.curve_widget = CurveWidget()
-        self.curve_widget.curveChanged.connect(self.update_stretch_preview)
-        curves_layout.addWidget(self.curve_widget)
-
-        row_crv_btn = QHBoxLayout()
-        self.btn_reset_curve = QPushButton("Resetear Curva")
-        self.btn_reset_curve.setStyleSheet("font-size: 11px; padding: 2px;")
-        self.btn_reset_curve.clicked.connect(self.curve_widget.reset_curve)
-        row_crv_btn.addWidget(self.btn_reset_curve)
-        curves_layout.addLayout(row_crv_btn)
-
-        left_layout.addWidget(grp_curves)
-              
-        # Balance de Blancos
-        grp_wb = QGroupBox("Balance de Blancos (Precisión Fina)")
-        wb_layout = QVBoxLayout(grp_wb)
-        wb_layout.setSpacing(3)
-
-        row_temp = QHBoxLayout()
-        row_temp.addWidget(QLabel("Temp (Frío / Cálido):"))
-        self.lbl_temp_val = QLabel("0.000")
-        row_temp.addWidget(self.lbl_temp_val)
-        wb_layout.addLayout(row_temp)
-
-        self.slider_temp = QSlider(Qt.Horizontal)
-        self.slider_temp.setRange(-250, 250)
-        self.slider_temp.setValue(0)
-        self.slider_temp.valueChanged.connect(self.on_temp_changed)
-        wb_layout.addWidget(self.slider_temp)
-
-        row_tint = QHBoxLayout()
-        row_tint.addWidget(QLabel("Tinte (Verde / Magenta):"))
-        self.lbl_tint_val = QLabel("0.000")
-        row_tint.addWidget(self.lbl_tint_val)
-        wb_layout.addLayout(row_tint)
-
-        self.slider_tint = QSlider(Qt.Horizontal)
-        self.slider_tint.setRange(-250, 250)
-        self.slider_tint.setValue(0)
-        self.slider_tint.valueChanged.connect(self.on_tint_changed)
-        wb_layout.addWidget(self.slider_tint)
-
-        btn_reset_wb = QPushButton("Restablecer Balance")
-        btn_reset_wb.clicked.connect(self.reset_wb)
-        wb_layout.addWidget(btn_reset_wb)
-        left_layout.addWidget(grp_wb)
-
-        # Ajuste Tonal Suelo
-        grp_gnd_tone = QGroupBox("Ajuste Tonal Suelo (Paisaje)")
+        # --- SECCIÓN 6: Ajuste Tonal Suelo ---
+        grp_gnd_tone = QGroupBox("6. Ajuste Tonal Suelo (Paisaje)")
         gnd_tone_layout = QVBoxLayout(grp_gnd_tone)
-        gnd_tone_layout.setSpacing(3)
+        gnd_tone_layout.setContentsMargins(10, 14, 10, 10)
+        gnd_tone_layout.setSpacing(8)
 
         row_gnd_ev = QHBoxLayout()
         row_gnd_ev.addWidget(QLabel("Exposición Suelo:"))
         self.lbl_gnd_ev = QLabel("0.00 EV")
+        self.lbl_gnd_ev.setStyleSheet("color: #ffd54f; font-weight: bold;")
         row_gnd_ev.addWidget(self.lbl_gnd_ev)
-        gnd_tone_layout.addLayout(row_gnd_ev)
-
+        row_gnd_ev.addSpacing(10)
         self.slider_gnd_ev = QSlider(Qt.Horizontal)
         self.slider_gnd_ev.setRange(-200, 300)
         self.slider_gnd_ev.setValue(0)
         self.slider_gnd_ev.valueChanged.connect(self.on_gnd_ev_changed)
-        gnd_tone_layout.addWidget(self.slider_gnd_ev)
+        row_gnd_ev.addWidget(self.slider_gnd_ev, stretch=1)
+        gnd_tone_layout.addLayout(row_gnd_ev)
 
-        row_gnd_sh = QHBoxLayout()
-        row_gnd_sh.addWidget(QLabel("Recuperar Sombras:"))
+        # Emparejamiento 3.2: Sombras (izq) y Punto Negro (der)
+        row_gnd_pair = QHBoxLayout()
+        row_gnd_pair.setSpacing(14)
+
+        col_sh = QVBoxLayout()
+        col_sh.setSpacing(4)
+        row_sh_lbl = QHBoxLayout()
+        row_sh_lbl.addWidget(QLabel("Sombras:"))
         self.lbl_gnd_sh = QLabel("0%")
-        row_gnd_sh.addWidget(self.lbl_gnd_sh)
-        gnd_tone_layout.addLayout(row_gnd_sh)
-
+        self.lbl_gnd_sh.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_sh_lbl.addWidget(self.lbl_gnd_sh)
+        col_sh.addLayout(row_sh_lbl)
         self.slider_gnd_sh = QSlider(Qt.Horizontal)
         self.slider_gnd_sh.setRange(0, 100)
         self.slider_gnd_sh.setValue(0)
         self.slider_gnd_sh.valueChanged.connect(self.on_gnd_shadows_changed)
-        gnd_tone_layout.addWidget(self.slider_gnd_sh)
+        col_sh.addWidget(self.slider_gnd_sh)
+        row_gnd_pair.addLayout(col_sh)
 
-        row_gnd_bp = QHBoxLayout()
-        row_gnd_bp.addWidget(QLabel("Punto Negro Suelo:"))
+        col_bp = QVBoxLayout()
+        col_bp.setSpacing(4)
+        row_bp_lbl = QHBoxLayout()
+        row_bp_lbl.addWidget(QLabel("Punto Negro:"))
         self.lbl_gnd_bp = QLabel("0.000")
-        row_gnd_bp.addWidget(self.lbl_gnd_bp)
-        gnd_tone_layout.addLayout(row_gnd_bp)
-
+        self.lbl_gnd_bp.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_bp_lbl.addWidget(self.lbl_gnd_bp)
+        col_bp.addLayout(row_bp_lbl)
         self.slider_gnd_bp = QSlider(Qt.Horizontal)
         self.slider_gnd_bp.setRange(-50, 100)
         self.slider_gnd_bp.setValue(0)
         self.slider_gnd_bp.valueChanged.connect(self.on_gnd_bp_changed)
-        gnd_tone_layout.addWidget(self.slider_gnd_bp)
+        col_bp.addWidget(self.slider_gnd_bp)
+        row_gnd_pair.addLayout(col_bp)
+        gnd_tone_layout.addLayout(row_gnd_pair)
 
         btn_reset_gnd = QPushButton("Restablecer Tono Suelo")
         btn_reset_gnd.clicked.connect(self.reset_gnd_tone)
@@ -394,116 +578,24 @@ class DeveloperTab(QWidget):
 
         left_layout.addWidget(grp_gnd_tone)
 
-        # Color e Intensidad
-        grp_sat = QGroupBox("Color: Saturación e Intensidad")
-        sat_layout = QVBoxLayout(grp_sat)
-        sat_layout.setSpacing(3)
-
-        row_sky = QHBoxLayout()
-        row_sky.addWidget(QLabel("Saturación Cielo:"))
-        self.lbl_sat_sky = QLabel("1.00x")
-        row_sky.addWidget(self.lbl_sat_sky)
-        sat_layout.addLayout(row_sky)
-
-        self.slider_sat_sky = QSlider(Qt.Horizontal)
-        self.slider_sat_sky.setRange(0, 250)
-        self.slider_sat_sky.setValue(100)
-        self.slider_sat_sky.valueChanged.connect(self.on_sat_sky_changed)
-        sat_layout.addWidget(self.slider_sat_sky)
-
-        row_gnd = QHBoxLayout()
-        row_gnd.addWidget(QLabel("Saturación Suelo:"))
-        self.lbl_sat_gnd = QLabel("1.00x")
-        row_gnd.addWidget(self.lbl_sat_gnd)
-        sat_layout.addLayout(row_gnd)
-
-        self.slider_sat_gnd = QSlider(Qt.Horizontal)
-        self.slider_sat_gnd.setRange(0, 250)
-        self.slider_sat_gnd.setValue(100)
-        self.slider_sat_gnd.valueChanged.connect(self.on_sat_gnd_changed)
-        sat_layout.addWidget(self.slider_sat_gnd)
-
-        row_vib = QHBoxLayout()
-        row_vib.addWidget(QLabel("Intensidad (Vibrance):"))
-        self.lbl_vibrance = QLabel("0.00")
-        row_vib.addWidget(self.lbl_vibrance)
-        sat_layout.addLayout(row_vib)
-
-        self.slider_vibrance = QSlider(Qt.Horizontal)
-        self.slider_vibrance.setRange(-100, 100)
-        self.slider_vibrance.setValue(0)
-        self.slider_vibrance.valueChanged.connect(self.on_vibrance_changed)
-        sat_layout.addWidget(self.slider_vibrance)
-
-        btn_reset_sat = QPushButton("Restablecer Color")
-        btn_reset_sat.clicked.connect(self.reset_saturation)
-        sat_layout.addWidget(btn_reset_sat)
-        left_layout.addWidget(grp_sat)
-
-        # MTF y Contraste
-        grp_stretch = QGroupBox("Estirado Tonal y Contraste")
-        stretch_layout = QVBoxLayout(grp_stretch)
-        stretch_layout.setSpacing(4)
-
-        btn_auto_mtf = QPushButton("Auto-Estirado MTF")
-        btn_auto_mtf.clicked.connect(self.apply_auto_mtf)
-        stretch_layout.addWidget(btn_auto_mtf)
-
-        row_bp = QHBoxLayout()
-        row_bp.addWidget(QLabel("Punto Negro:"))
-        self.spin_bp = QDoubleSpinBox()
-        self.spin_bp.setDecimals(5)
-        self.spin_bp.setRange(0.0, 0.20000)
-        self.spin_bp.setSingleStep(0.00010)
-        self.spin_bp.setValue(0.0)
-        self.spin_bp.valueChanged.connect(self.on_spin_bp_changed)
-        row_bp.addWidget(self.spin_bp)
-        stretch_layout.addLayout(row_bp)
-
-        self.slider_bp = QSlider(Qt.Horizontal)
-        self.slider_bp.setRange(0, 2000)
-        self.slider_bp.setValue(0)
-        self.slider_bp.valueChanged.connect(self.on_slider_bp_changed)
-        stretch_layout.addWidget(self.slider_bp)
-
-        row_mtf = QHBoxLayout()
-        row_mtf.addWidget(QLabel("Medios Tonos (m):"))
-        self.spin_mtf = QDoubleSpinBox()
-        self.spin_mtf.setDecimals(5)
-        self.spin_mtf.setRange(0.00010, 0.50000)
-        self.spin_mtf.setSingleStep(0.00050)
-        self.spin_mtf.setValue(0.10000)
-        self.spin_mtf.valueChanged.connect(self.on_spin_mtf_changed)
-        row_mtf.addWidget(self.spin_mtf)
-        stretch_layout.addLayout(row_mtf)
-
-        self.slider_mtf = QSlider(Qt.Horizontal)
-        self.slider_mtf.setRange(1, 2000)
-        self.slider_mtf.setValue(400)
-        self.slider_mtf.valueChanged.connect(self.on_slider_mtf_changed)
-        stretch_layout.addWidget(self.slider_mtf)
-
-        row_cnt = QHBoxLayout()
-        row_cnt.addWidget(QLabel("Contraste:"))
-        self.lbl_contrast = QLabel("0.00")
-        row_cnt.addWidget(self.lbl_contrast)
-        stretch_layout.addLayout(row_cnt)
-
-        self.slider_contrast = QSlider(Qt.Horizontal)
-        self.slider_contrast.setRange(-100, 100)
-        self.slider_contrast.setValue(0)
-        self.slider_contrast.valueChanged.connect(self.on_contrast_changed)
-        stretch_layout.addWidget(self.slider_contrast)
-
-        btn_reset = QPushButton("Restablecer Tono")
-        btn_reset.clicked.connect(self.reset_sliders)
-        stretch_layout.addWidget(btn_reset)
-        left_layout.addWidget(grp_stretch)
-
-        # Exportación
-        self.btn_export = QPushButton("Exportar Imagen Revelada...")
-        self.btn_export.setFixedHeight(38)
-        self.btn_export.setStyleSheet("font-weight: bold; background-color: #2e6648; color: white;")
+        # --- SECCIÓN 7: Exportación ---
+        self.btn_export = QPushButton("💾 Exportar Imagen Revelada...")
+        self.btn_export.setFixedHeight(42)
+        self.btn_export.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 13px;
+                background-color: #2e6648;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #388e3c;
+            }
+            QPushButton:pressed {
+                background-color: #1b5e20;
+            }
+        """)
         self.btn_export.clicked.connect(self.export_image)
         left_layout.addWidget(self.btn_export)
         left_layout.addStretch()
@@ -524,25 +616,24 @@ class DeveloperTab(QWidget):
 
         left_container = QWidget()
         left_container_layout = QVBoxLayout(left_container)
-        left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.setContentsMargins(8, 8, 8, 8)
         left_container_layout.setSpacing(6)
-        left_container.setMinimumWidth(380)
-        left_container.setMaximumWidth(520)
+        left_container.setMinimumWidth(410)
+        left_container.setMaximumWidth(500)
 
         left_container_layout.addWidget(scroll_area, 1)
 
-        lbl_log = QLabel("Registro del Revelador:")
-        lbl_log.setStyleSheet("font-weight: bold; font-size: 11px; margin-left: 10px; margin-top: 4px;")
+        lbl_log = QLabel("Registro de Actividad:")
+        lbl_log.setStyleSheet("color: #a0a0a0; font-size: 11px; font-weight: bold;")
         left_container_layout.addWidget(lbl_log, 0)
 
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setFixedHeight(150)
+        self.txt_log.setFixedHeight(100)
         self.txt_log.setStyleSheet(
-            "background-color: #141414; color: #d0d0d0; "
+            "background-color: #141414; color: #a5d6a7; "
             "font-family: Consolas, monospace; font-size: 11px; "
-            "border: 1px solid #333333; border-radius: 4px; padding: 4px; "
-            "margin-left: 10px; margin-right: 10px; margin-bottom: 10px;"
+            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
         )
         left_container_layout.addWidget(self.txt_log, 0)
 

@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QTabWidget, QListWidget, QListWidgetItem, QProgressBar,
     QMessageBox, QGroupBox, QRadioButton, QSlider, QDoubleSpinBox,
-    QComboBox, QSplitter, QTextEdit, QSizePolicy, QCheckBox, QSpinBox
+    QComboBox, QSplitter, QTextEdit, QSizePolicy, QCheckBox, QSpinBox,
+    QScrollArea
 )
 from PySide6.QtCore import Qt, Signal, QCoreApplication
 from PySide6.QtGui import QTextCursor, QCursor
@@ -23,7 +24,7 @@ from core.config_manager import load_config
 
 
 class FileListRow(QWidget):
-    """Widget de fila con etiqueta de referencia y botón de borrado individual."""
+    """Widget de fila con etiqueta de referencia estilizada y botón de borrado individual."""
     delete_requested = Signal(str, str)  # (tab_name, filepath)
 
     def __init__(self, filepath: str, tab_name: str, is_ref: bool = False, parent=None):
@@ -35,9 +36,9 @@ class FileListRow(QWidget):
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
 
-        # Indicador de referencia / activo
-        self.lbl_ref = QLabel("✓ REF" if is_ref else "     ")
-        self.lbl_ref.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 11px;")
+        # Indicador de referencia / activo tipo badge
+        self.lbl_ref = QLabel()
+        self.set_as_reference(is_ref)
         layout.addWidget(self.lbl_ref)
 
         # Nombre del archivo
@@ -58,7 +59,12 @@ class FileListRow(QWidget):
         layout.addWidget(self.btn_del)
 
     def set_as_reference(self, is_ref: bool):
-        self.lbl_ref.setText("✓ REF" if is_ref else "     ")
+        if is_ref:
+            self.lbl_ref.setText("📌 REF")
+            self.lbl_ref.setStyleSheet("color: #69f0ae; font-weight: bold; font-size: 10px; background-color: #1b3a24; border-radius: 3px; padding: 1px 4px;")
+        else:
+            self.lbl_ref.setText("      ")
+            self.lbl_ref.setStyleSheet("color: transparent; font-size: 10px; padding: 1px 4px;")
 
 
 class StackerTab(QWidget):
@@ -92,35 +98,46 @@ class StackerTab(QWidget):
         self.canvas = MaskCanvas(self, enable_masking=True)
         self.canvas.brush_size_changed.connect(self.on_canvas_brush_changed)
 
-        # 2. Panel lateral
+        # 2. Panel lateral (Scrollable con Log y Ejecución Fijos Abajo)
         left_panel = QWidget()
-        left_panel.setMinimumWidth(370)
-        left_panel.setMaximumWidth(430)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.setSpacing(6)
+        left_panel.setMinimumWidth(410)
+        left_panel.setMaximumWidth(500)
+        left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(8, 8, 8, 8)
+        left_panel_layout.setSpacing(6)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        panel_content = QWidget()
+        left_layout = QVBoxLayout(panel_content)
+        left_layout.setContentsMargins(2, 2, 8, 2)
+        left_layout.setSpacing(10)
 
         # SECCIÓN 1: Gestión de Sesión / Proyecto
-        self.grp_project = QGroupBox("Sesión de Apilado (.mwstack)")
+        self.grp_project = QGroupBox("1. Sesión y Proyecto (.mwstack)")
         proj_layout = QVBoxLayout(self.grp_project)
         
         self.lbl_session = QLabel("Sesión: Sin guardar")
-        self.lbl_session.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        self.lbl_session.setStyleSheet("color: #80cbc4; font-size: 11px; font-weight: bold;")
         proj_layout.addWidget(self.lbl_session)
 
         btn_proj_row = QHBoxLayout()
+        btn_proj_row.setSpacing(6)
         
-        self.btn_new_sess = QPushButton("Nueva")
+        self.btn_new_sess = QPushButton("✨ Nueva")
         self.btn_new_sess.setStyleSheet("font-weight: bold; color: #ffab91;")
         self.btn_new_sess.setToolTip("Reiniciar proyecto completo, vaciar tomas, máscaras y revelador")
         self.btn_new_sess.clicked.connect(self.on_new_session_clicked)
         btn_proj_row.addWidget(self.btn_new_sess)
 
-        self.btn_open_sess = QPushButton("Cargar")
+        self.btn_open_sess = QPushButton("📁 Cargar")
         self.btn_open_sess.clicked.connect(self.open_project)
-        self.btn_save_sess = QPushButton("Guardar")
+        self.btn_save_sess = QPushButton("💾 Guardar")
         self.btn_save_sess.clicked.connect(self.save_project)
-        self.btn_save_as_sess = QPushButton("Guardar Como...")
+        self.btn_save_as_sess = QPushButton("💾 Guardar Como...")
         self.btn_save_as_sess.clicked.connect(self.save_project_as)
 
         btn_proj_row.addWidget(self.btn_open_sess)
@@ -130,39 +147,49 @@ class StackerTab(QWidget):
         left_layout.addWidget(self.grp_project)
 
         # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Flats / Suelo)
+        self.grp_files = QGroupBox("2. Calibración y Tomas")
+        files_layout = QVBoxLayout(self.grp_files)
+
         self.tabs_files = QTabWidget()
+        self.tabs_files.setMinimumHeight(160)
         
         self.list_lights = QListWidget()
         self.list_lights.itemDoubleClicked.connect(self.on_light_double_clicked)
-        self.tabs_files.addTab(self.list_lights, "Lights")
+        self.tabs_files.addTab(self.list_lights, "⭐ Lights")
 
         self.list_darks = QListWidget()
-        self.tabs_files.addTab(self.list_darks, "Darks")
+        self.tabs_files.addTab(self.list_darks, "🌑 Darks")
 
         self.list_flats = QListWidget()
-        self.tabs_files.addTab(self.list_flats, "Flats")
+        self.tabs_files.addTab(self.list_flats, "💡 Flats")
 
         self.list_bias = QListWidget()
-        self.tabs_files.addTab(self.list_bias, "Bias")
+        self.tabs_files.addTab(self.list_bias, "⚡ Bias")
 
         self.list_ground = QListWidget()
         self.list_ground.itemDoubleClicked.connect(self.on_ground_double_clicked)
-        self.tabs_files.addTab(self.list_ground, "Suelo")
+        self.tabs_files.addTab(self.list_ground, "🏞️ Suelo")
         
-        left_layout.addWidget(self.tabs_files, stretch=1)
+        files_layout.addWidget(self.tabs_files)
 
         btn_box = QHBoxLayout()
-        self.btn_add_files = QPushButton("Añadir Tomas...")
+        btn_box.setSpacing(6)
+        self.btn_add_files = QPushButton("➕ Añadir Tomas...")
+        self.btn_add_files.setStyleSheet("font-weight: bold; color: #80d8ff;")
         self.btn_add_files.clicked.connect(self.add_current_tab_files)
-        self.btn_clear_files = QPushButton("Limpiar Pestaña")
+        self.btn_clear_files = QPushButton("🗑️ Limpiar Pestaña")
         self.btn_clear_files.clicked.connect(self.clear_current_tab_files)
         btn_box.addWidget(self.btn_add_files)
         btn_box.addWidget(self.btn_clear_files)
-        left_layout.addLayout(btn_box)
+        files_layout.addLayout(btn_box)
 
-        # SECCIÓN 3: Parámetros de Apilado
-        self.grp_settings = QGroupBox("Parámetros de Integración")
+        left_layout.addWidget(self.grp_files)
+
+        # SECCIÓN 3: Parámetros de Integración
+        self.grp_settings = QGroupBox("3. Parámetros de Integración")
         set_layout = QVBoxLayout(self.grp_settings)
+        set_layout.setSpacing(6)
+
         set_layout.addWidget(QLabel("Modo de Captura:"))
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Trípode Fijo (Suelo Estático)", "Star Tracker (Seguimiento)"])
@@ -179,17 +206,22 @@ class StackerTab(QWidget):
         ])
         set_layout.addWidget(self.combo_ground)
 
-        set_layout.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
+        row_kappa = QHBoxLayout()
+        row_kappa.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
         self.spin_kappa = QDoubleSpinBox()
         self.spin_kappa.setRange(0.5, 5.0)
         self.spin_kappa.setValue(2.2)
         self.spin_kappa.setSingleStep(0.1)
-        set_layout.addWidget(self.spin_kappa)
+        self.spin_kappa.setFixedWidth(75)
+        row_kappa.addWidget(self.spin_kappa)
+        set_layout.addLayout(row_kappa)
+
         left_layout.addWidget(self.grp_settings)
 
-        # Antipolución en Apilado
-        self.grp_stack_lp = QGroupBox("Antipolución en Apilado")
+        # SECCIÓN 4: Antipolución en Apilado
+        self.grp_stack_lp = QGroupBox("4. Reducción de Polución Lumínica")
         layout_stack_lp = QVBoxLayout(self.grp_stack_lp)
+        layout_stack_lp.setSpacing(6)
 
         row_lp_algo = QHBoxLayout()
         row_lp_algo.addWidget(QLabel("Algoritmo:"))
@@ -206,6 +238,7 @@ class StackerTab(QWidget):
         row_lp_str = QHBoxLayout()
         row_lp_str.addWidget(QLabel("Fuerza Antipolución:"))
         self.lbl_lp_str = QLabel("50%")
+        self.lbl_lp_str.setStyleSheet("color: #ffd54f; font-weight: bold;")
         row_lp_str.addWidget(self.lbl_lp_str)
         layout_stack_lp.addLayout(row_lp_str)
 
@@ -217,31 +250,38 @@ class StackerTab(QWidget):
 
         left_layout.addWidget(self.grp_stack_lp)
 
-        # SECCIÓN 4: Máscara Cielo / Suelo
-        self.grp_mask = QGroupBox("Máscara Cielo / Suelo")
+        # SECCIÓN 5: Máscara Cielo / Suelo
+        self.grp_mask = QGroupBox("5. Segmentación Cielo / Suelo (Máscara)")
         mask_layout = QVBoxLayout(self.grp_mask)
+        mask_layout.setSpacing(6)
 
         row_mask_toggles = QHBoxLayout()
-        self.chk_show_mask = QCheckBox("Mostrar Máscara")
+        self.chk_show_mask = QCheckBox("👁️ Mostrar Máscara")
         self.chk_show_mask.setChecked(True)
         self.chk_show_mask.toggled.connect(self.canvas.set_mask_visible)
         row_mask_toggles.addWidget(self.chk_show_mask)
 
-        self.chk_show_strokes = QCheckBox("Mostrar Trazos")
+        self.chk_show_strokes = QCheckBox("✏️ Mostrar Trazos")
         self.chk_show_strokes.setChecked(True)
         self.chk_show_strokes.toggled.connect(self.canvas.set_scribbles_visible)
         row_mask_toggles.addWidget(self.chk_show_strokes)
         mask_layout.addLayout(row_mask_toggles)
 
-        self.rb_sky = QRadioButton("Pintar Cielo (Verde)")
-        self.rb_ground = QRadioButton("Pintar Suelo (Rojo)")
+        self.rb_sky = QRadioButton("🟢 Pintar Cielo (Verde)")
+        self.rb_sky.setStyleSheet("color: #a5d6a7; font-weight: bold;")
+        self.rb_ground = QRadioButton("🔴 Pintar Suelo (Rojo)")
+        self.rb_ground.setStyleSheet("color: #ef9a9a; font-weight: bold;")
         self.rb_sky.setChecked(True)
         self.rb_sky.toggled.connect(self.update_brush_mode)
         mask_layout.addWidget(self.rb_sky)
         mask_layout.addWidget(self.rb_ground)
 
+        row_brush_info = QHBoxLayout()
         self.lbl_brush = QLabel("Tamaño de Cursor: 40 px")
-        mask_layout.addWidget(self.lbl_brush)
+        self.lbl_brush.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_brush_info.addWidget(self.lbl_brush)
+        mask_layout.addLayout(row_brush_info)
+
         self.slider_brush = QSlider(Qt.Horizontal)
         self.slider_brush.setRange(5, 120)
         self.slider_brush.setValue(20)
@@ -255,58 +295,98 @@ class StackerTab(QWidget):
         self.spin_feather.setRange(1, 31)
         self.spin_feather.setSingleStep(2)
         self.spin_feather.setValue(7)
+        self.spin_feather.setFixedWidth(55)
         row_params.addWidget(self.spin_feather)
 
         row_params.addWidget(QLabel("Pasos:"))
         self.spin_iter = QSpinBox()
         self.spin_iter.setRange(1, 8)
         self.spin_iter.setValue(3)
+        self.spin_iter.setFixedWidth(50)
         row_params.addWidget(self.spin_iter)
         mask_layout.addLayout(row_params)
 
         btn_mask_actions = QHBoxLayout()
-        self.btn_refine = QPushButton("Refinar Automática")
+        btn_mask_actions.setSpacing(6)
+        self.btn_refine = QPushButton("✨ Refinar Automática")
+        self.btn_refine.setStyleSheet("font-weight: bold; color: #b388ff; padding: 5px;")
         self.btn_refine.clicked.connect(self.refine_mask)
-        self.btn_clear_m = QPushButton("Limpiar Máscara")
-        self.btn_clear_m.setStyleSheet("color: #ff9e80;")
+        self.btn_clear_m = QPushButton("🗑️ Limpiar Máscara")
+        self.btn_clear_m.setStyleSheet("color: #ff8a80;")
         self.btn_clear_m.clicked.connect(self.clear_mask)
         btn_mask_actions.addWidget(self.btn_refine)
         btn_mask_actions.addWidget(self.btn_clear_m)
         mask_layout.addLayout(btn_mask_actions)
 
         btn_mask_io = QHBoxLayout()
-        self.btn_load_m = QPushButton("Cargar PNG")
+        btn_mask_io.setSpacing(6)
+        self.btn_load_m = QPushButton("📁 Cargar PNG")
         self.btn_load_m.clicked.connect(self.load_mask)
-        self.btn_save_m = QPushButton("Exportar PNG")
+        self.btn_save_m = QPushButton("💾 Exportar PNG")
         self.btn_save_m.clicked.connect(self.save_mask)
         btn_mask_io.addWidget(self.btn_load_m)
         btn_mask_io.addWidget(self.btn_save_m)
         mask_layout.addLayout(btn_mask_io)
+
         left_layout.addWidget(self.grp_mask)
-        
-        # SECCIÓN 5: Registro y Ejecución
-        left_layout.addWidget(QLabel("Registro de Actividad:"))
+
+        # Cierre del scroll_area
+        scroll_area.setWidget(panel_content)
+        left_panel_layout.addWidget(scroll_area, stretch=1)
+
+        # SECCIÓN INFERIOR FIJA: Progreso, Registro de Actividad y Ejecución
+        lbl_log = QLabel("Registro de Actividad:")
+        lbl_log.setStyleSheet("color: #a0a0a0; font-size: 11px; font-weight: bold;")
+        left_panel_layout.addWidget(lbl_log)
+
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setFixedHeight(100)
         self.txt_log.setStyleSheet(
-            "background-color: #141414; color: #d0d0d0; "
+            "background-color: #141414; color: #a5d6a7; "
             "font-family: Consolas, monospace; font-size: 11px; "
             "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
         )
-        left_layout.addWidget(self.txt_log)
+        left_panel_layout.addWidget(self.txt_log)
 
         self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(18)
+        self.progress_bar.setTextVisible(True)
         self.progress_bar.setValue(0)
-        left_layout.addWidget(self.progress_bar)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #333333;
+                border-radius: 3px;
+                text-align: center;
+                font-size: 10px;
+                background-color: #1a1a1a;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #0288d1;
+            }
+        """)
+        left_panel_layout.addWidget(self.progress_bar)
 
-        self.btn_run = QPushButton("INICIAR APILADO DUAL")
-        self.btn_run.setFixedHeight(45)
-        self.btn_run.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
-        )
+        self.btn_run = QPushButton("🚀 INICIAR APILADO DUAL")
+        self.btn_run.setFixedHeight(46)
+        self.btn_run.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 13px;
+                background-color: #1976d2;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1e88e5;
+            }
+            QPushButton:pressed {
+                background-color: #1565c0;
+            }
+        """)
         self.btn_run.clicked.connect(self._on_btn_run_clicked)
-        left_layout.addWidget(self.btn_run)
+        left_panel_layout.addWidget(self.btn_run)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(self.canvas)
@@ -748,10 +828,22 @@ class StackerTab(QWidget):
 
         self._set_ui_busy(True)
         self.btn_run.setEnabled(True)
-        self.btn_run.setText("CANCELAR APILADO")
-        self.btn_run.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #c62828; color: white;"
-        )
+        self.btn_run.setText("🛑 CANCELAR APILADO")
+        self.btn_run.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 13px;
+                background-color: #c62828;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+            QPushButton:pressed {
+                background-color: #b71c1c;
+            }
+        """)
 
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Iniciando... %p%")
@@ -888,6 +980,8 @@ class StackerTab(QWidget):
         """Bloquea o desbloquea controles secundarios durante el procesamiento."""
         self.grp_project.setEnabled(not busy)
         self.tabs_files.setEnabled(not busy)
+        if hasattr(self, "grp_files"):
+            self.grp_files.setEnabled(not busy)
         self.btn_add_files.setEnabled(not busy)
         self.btn_clear_files.setEnabled(not busy)
         self.grp_settings.setEnabled(not busy)        
@@ -905,9 +999,9 @@ class StackerTab(QWidget):
         """Solicita la detención inmediata del proceso."""
         if self.worker is not None and self.worker.isRunning():
             self.btn_run.setEnabled(False)
-            self.btn_run.setText("CANCELANDO PROCESOS...")
+            self.btn_run.setText("⏳ CANCELANDO PROCESOS...")
             self.btn_run.setStyleSheet(
-                "font-weight: bold; font-size: 13px; background-color: #555555; color: #aaaaaa;"
+                "QPushButton { font-weight: bold; font-size: 13px; background-color: #424242; color: #9e9e9e; border-radius: 6px; }"
             )
             self.progress_bar.setFormat("Deteniendo... %p%")
             self.log_message("[AVISO] Solicitando parada de tareas y liberación de memoria...")
@@ -916,10 +1010,22 @@ class StackerTab(QWidget):
     def _reset_run_button(self):
         """Devuelve el botón a su apariencia y comportamiento normal."""
         self.btn_run.setEnabled(True)
-        self.btn_run.setText("INICIAR APILADO DUAL")
-        self.btn_run.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #2b5c8f; color: white;"
-        )
+        self.btn_run.setText("🚀 INICIAR APILADO DUAL")
+        self.btn_run.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 13px;
+                background-color: #1976d2;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1e88e5;
+            }
+            QPushButton:pressed {
+                background-color: #1565c0;
+            }
+        """)
         self._set_ui_busy(False)
         
     def on_ground_double_clicked(self, item):

@@ -28,3 +28,7 @@ imagenes/*
 
 exportaciones/*
 !exportaciones/.gitkeep
+
+# Recursos estáticos de la interfaz
+!gui/assets/
+!gui/assets/*

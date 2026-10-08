@@ -46,10 +46,12 @@
   - Filtro bilateral tangencial de alta frecuencia para realce selectivo de líneas de campo magnético solar.
 - **Exportación Dual 16-bit / 32-bit:** Exportación directa a TIFF de 16 bits optimizada (`uint16`, zlib, `photometric='rgb'`) compatible de forma nativa con Photoshop y Lightroom sin mapeos forzados de tono, y TIFF de 32 bits flotante para archivo maestro.
 
-### 6. Configuración y Rendimiento
+### 6. Configuración, Rendimiento y Vitrina de Resultados
+- **Interfaz Moderna Unificada:** Paneles laterales oscuros con desplazamiento independiente mediante `QScrollArea`, consolas de registro (`txt_log`) fijas en la base en todos los módulos y diseño responsivo optimizado para pantallas compactas y monitores de alta resolución.
+- **Vitrina de Resultados Integrada (Showcase):** Panel visual en la pestaña de Configuración con visor responsivo antialias que exhibe astrofotografía real de paisaje procesada de principio a fin con Apilator, acreditación de autoría (*Fotografía y Procesado: Shilmar*) e inspección a resolución nativa.
 - **Aceleración por GPU Dual:** Soporte automático para NVIDIA CUDA mediante CuPy y conmutación transparente a CPU multinúcleo en equipos sin GPU dedicada.
 - **Estrategias de Memoria Configurables:** Modos automático, memoria RAM intermedia de alta velocidad o volcado temporal a disco SSD para equipos con recursos limitados.
-- **Detección Automática de Binarios:** Localización y validación de ejecutables externos de StarNet++ CLI y GraXpert.
+- **Detección Automática de Binarios:** Localización y validación dinámica de ejecutables externos de StarNet++ CLI y GraXpert con indicadores en tiempo real de disponibilidad.
 
 ---
 
@@ -70,6 +72,8 @@ apilator/
 │   ├── stacking.py          # Motor de calibración (Dark/Flat/Bias), alineación y apilado
 │   └── stretch.py           # Algoritmos MTF, ondículas À Trous, balance y tono
 └── gui/
+    ├── assets/              # Recursos gráficos y fotografía de demostración
+    │   └── showcase_milkyway.jpg
     ├── canvas.py            # Visor interactivo QGraphicsView acelerado con zoom 1:1
     ├── main_window.py       # Ventana principal y gestión de pestañas maestras
     ├── tab_developer.py     # Pestaña de revelado y composición de capas
