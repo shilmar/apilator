@@ -89,7 +89,11 @@ def compute_comet_weights(
     return weights
 
 
-def build_master_dark(dark_files: List[str], progress_callback: Optional[Callable[[int, str], None]] = None) -> Optional[np.ndarray]:
+def build_master_dark(
+    dark_files: List[str],
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    abort_flag: Optional[Callable[[], bool]] = None
+) -> Optional[np.ndarray]:
     """Calcula el Master Dark promediado a partir de la lista de tomas oscuras."""
     if not dark_files:
         return None
@@ -97,6 +101,8 @@ def build_master_dark(dark_files: List[str], progress_callback: Optional[Callabl
     n = len(dark_files)
     dark_acc = None
     for i, path in enumerate(dark_files):
+        if abort_flag and abort_flag():
+            raise InterruptedError("Procesamiento cancelado por el usuario.")
         if progress_callback:
             progress_callback(int(5 + (i / n) * 15), f"Cargando dark ({i+1}/{n}): {os.path.basename(path)}")
         d_img = load_image_as_float32(path)
@@ -228,6 +234,72 @@ def clean_frame_streaks(
     return cleaned_img, found_streaks
 
 
+def compute_gap_bridge(
+    prev_img: np.ndarray,
+    curr_img: np.ndarray,
+    radius: int = 3,
+    threshold_factor: float = 3.0,
+    sky_mask: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Calcula un puente continuo de luminancia estelar entre dos fotogramas consecutivos
+    para eliminar los huecos periódicos (gap filling) provocados por el tiempo de obturación
+    e intervalómetro.
+    
+    :param prev_img: Fotograma anterior (float32 RGB [0, 1]).
+    :param curr_img: Fotograma actual (float32 RGB [0, 1]).
+    :param radius: Radio de dilatación en píxeles (cierra saltos de hasta 2*radius píxeles).
+    :param threshold_factor: Factor multiplicador sobre el MAD de ruido para aislar estrellas.
+    :param sky_mask: Máscara opcional donde > 0 indica cielo. Si se proporciona, el suelo no se dilata.
+    :return: Matriz float32 RGB con los puentes de estrellas calculados (0 en fondo y suelo).
+    """
+    h, w = prev_img.shape[:2]
+    lum_p = 0.299 * prev_img[..., 0] + 0.587 * prev_img[..., 1] + 0.114 * prev_img[..., 2]
+    lum_c = 0.299 * curr_img[..., 0] + 0.587 * curr_img[..., 1] + 0.114 * curr_img[..., 2]
+
+    sky_mask_bool = None
+    if sky_mask is not None:
+        sm = sky_mask.astype(np.float32)
+        if sm.shape[:2] != (h, w):
+            sm = cv2.resize(sm, (w, h), interpolation=cv2.INTER_NEAREST)
+        if sm.ndim == 3:
+            sm = sm[..., 0]
+        if sm.max() > 1.05:
+            sm /= 255.0
+        sky_mask_bool = (sm > 0.3)
+
+    if sky_mask_bool is not None and np.any(sky_mask_bool):
+        sample_p = lum_p[sky_mask_bool]
+        sample_c = lum_c[sky_mask_bool]
+    else:
+        sample_p = lum_p
+        sample_c = lum_c
+
+    bg_p = float(np.median(sample_p))
+    mad_p = float(1.4826 * np.median(np.abs(sample_p - bg_p)))
+    thresh_p = bg_p + max(mad_p * threshold_factor, 0.015)
+
+    bg_c = float(np.median(sample_c))
+    mad_c = float(1.4826 * np.median(np.abs(sample_c - bg_c)))
+    thresh_c = bg_c + max(mad_c * threshold_factor, 0.015)
+
+    stars_p = np.maximum(0.0, prev_img - thresh_p)
+    stars_c = np.maximum(0.0, curr_img - thresh_c)
+
+    if sky_mask_bool is not None:
+        stars_p[~sky_mask_bool] = 0.0
+        stars_c[~sky_mask_bool] = 0.0
+
+    k_size = max(3, int(radius * 2 + 1))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+    d_p = cv2.dilate(stars_p, k)
+    d_c = cv2.dilate(stars_c, k)
+    bridge_stars = np.minimum(d_p, d_c)
+    bridge_stars[bridge_stars < 0.005] = 0.0
+
+    return bridge_stars
+
+
 def generate_startrail(
     files: List[str],
     mode: str = "lighten",
@@ -241,6 +313,9 @@ def generate_startrail(
     suppress_streaks: bool = False,
     streak_sensitivity: float = 0.5,
     min_streak_length: int = 40,
+    fill_gaps: bool = False,
+    gap_fill_radius: int = 3,
+    gap_fill_threshold_factor: float = 3.0,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     abort_flag: Optional[Callable[[], bool]] = None
 ) -> np.ndarray:
@@ -259,6 +334,9 @@ def generate_startrail(
     :param suppress_streaks: Si es True, detecta y suprime satélites y aviones automáticamente.
     :param streak_sensitivity: Sensibilidad de detección de trazas (0.1 a 1.0).
     :param min_streak_length: Longitud mínima en píxeles del trazo para considerarlo satélite/avión.
+    :param fill_gaps: Si es True, conecta de forma continua las estrellas entre fotogramas consecutivos (Gap Filling).
+    :param gap_fill_radius: Radio en píxeles del salto temporal a rellenar (1 a 8 px, típicamente 3 o 4 px).
+    :param gap_fill_threshold_factor: Factor de umbral adaptativo sobre el ruido para discriminar estrellas.
     :param progress_callback: Función callback (porcentaje: int, mensaje: str).
     :param abort_flag: Función que devuelve True si el usuario solicita cancelar el proceso.
     :return: Imagen final float32 RGB en rango [0.0, 1.0].
@@ -277,7 +355,7 @@ def generate_startrail(
     if dark_files and len(dark_files) > 0:
         if progress_callback:
             progress_callback(5, "Calculando Master Dark...")
-        master_dark = build_master_dark(dark_files, progress_callback)
+        master_dark = build_master_dark(dark_files, progress_callback, abort_flag)
 
     # 2. Ponderación para efecto cometa
     comet_weights = None
@@ -316,12 +394,17 @@ def generate_startrail(
         loaded_frames: Dict[int, np.ndarray] = {}
 
         def get_frame(idx: int) -> np.ndarray:
+            if abort_flag and abort_flag():
+                raise InterruptedError("Procesamiento de trazas cancelado por el usuario.")
             if idx not in loaded_frames:
                 img = load_image_as_float32(files[idx])
                 if master_dark is not None and master_dark.shape == img.shape:
                     img = np.maximum(0.0, img - master_dark)
                 loaded_frames[idx] = img
             return loaded_frames[idx]
+
+        prev_clean: Optional[np.ndarray] = None
+        prev_weight: float = 1.0
 
         for i in range(n_files):
             if abort_flag and abort_flag():
@@ -364,15 +447,31 @@ def generate_startrail(
             if i == ref_idx:
                 ref_frame = cleaned_img.copy()
 
+            curr_weight = comet_weights[i] if (mode == "comet" and comet_weights is not None) else 1.0
             if mode == "comet" and comet_weights is not None:
-                frame_sky = cleaned_img * comet_weights[i]
+                frame_sky = cleaned_img * curr_weight
             else:
                 frame_sky = cleaned_img
 
             if sky_acc is None:
                 sky_acc = frame_sky.copy()
             else:
+                if fill_gaps and prev_clean is not None:
+                    bridge = compute_gap_bridge(
+                        prev_clean, cleaned_img,
+                        radius=gap_fill_radius,
+                        threshold_factor=gap_fill_threshold_factor,
+                        sky_mask=mask
+                    )
+                    if mode == "comet" and comet_weights is not None:
+                        w_bridge = 0.5 * (prev_weight + curr_weight)
+                        bridge = bridge * w_bridge
+                    np.maximum(sky_acc, bridge, out=sky_acc)
+
                 np.maximum(sky_acc, frame_sky, out=sky_acc)
+
+            prev_clean = cleaned_img
+            prev_weight = curr_weight
 
             if use_clean_ground and mask_3c is not None and ground_mode == "average":
                 if ground_sum is None:
@@ -384,6 +483,9 @@ def generate_startrail(
 
     else:
         # Acumulación directa estándar
+        prev_img: Optional[np.ndarray] = None
+        prev_weight: float = 1.0
+
         for i, path in enumerate(files):
             if abort_flag and abort_flag():
                 raise InterruptedError("Procesamiento de trazas cancelado por el usuario.")
@@ -401,15 +503,31 @@ def generate_startrail(
             if i == ref_idx:
                 ref_frame = img.copy()
 
+            curr_weight = comet_weights[i] if (mode == "comet" and comet_weights is not None) else 1.0
             if mode == "comet" and comet_weights is not None:
-                frame_sky = img * comet_weights[i]
+                frame_sky = img * curr_weight
             else:
                 frame_sky = img
 
             if sky_acc is None:
                 sky_acc = frame_sky.copy()
             else:
+                if fill_gaps and prev_img is not None:
+                    bridge = compute_gap_bridge(
+                        prev_img, img,
+                        radius=gap_fill_radius,
+                        threshold_factor=gap_fill_threshold_factor,
+                        sky_mask=mask
+                    )
+                    if mode == "comet" and comet_weights is not None:
+                        w_bridge = 0.5 * (prev_weight + curr_weight)
+                        bridge = bridge * w_bridge
+                    np.maximum(sky_acc, bridge, out=sky_acc)
+
                 np.maximum(sky_acc, frame_sky, out=sky_acc)
+
+            prev_img = img
+            prev_weight = curr_weight
 
             if use_clean_ground and mask_3c is not None and ground_mode == "average":
                 if ground_sum is None:

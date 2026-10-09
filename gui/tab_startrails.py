@@ -35,6 +35,7 @@ class StartrailWorker(QThread):
     """Hilo de trabajo en segundo plano para el procesamiento de trazas sin bloquear la interfaz."""
     progress = Signal(int, str)
     finished = Signal(object, str)
+    cancelled = Signal()
     error = Signal(str)
 
     def __init__(self, params: Dict[str, Any]):
@@ -59,12 +60,66 @@ class StartrailWorker(QThread):
                 feather_radius=self.params.get("feather_radius", 5),
                 suppress_streaks=self.params.get("suppress_streaks", False),
                 streak_sensitivity=self.params.get("streak_sensitivity", 0.5),
+                fill_gaps=self.params.get("fill_gaps", False),
+                gap_fill_radius=self.params.get("gap_fill_radius", 3),
+                gap_fill_threshold_factor=self.params.get("gap_fill_threshold_factor", 3.0),
                 progress_callback=self.progress.emit,
                 abort_flag=lambda: self._is_cancelled
             )
+            if self._is_cancelled:
+                self.cancelled.emit()
+                return
             self.finished.emit(result, "startrail_generation")
+        except InterruptedError:
+            self.cancelled.emit()
         except Exception as e:
-            self.error.emit(str(e))
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+
+
+STYLE_RUN_IDLE = """
+    QPushButton {
+        font-weight: bold;
+        font-size: 13px;
+        background-color: #2e7d32;
+        color: white;
+        border-radius: 4px;
+    }
+    QPushButton:hover {
+        background-color: #388e3c;
+    }
+    QPushButton:pressed {
+        background-color: #1b5e20;
+    }
+"""
+
+STYLE_RUN_ACTIVE = """
+    QPushButton {
+        font-weight: bold;
+        font-size: 13px;
+        background-color: #c62828;
+        color: white;
+        border-radius: 4px;
+    }
+    QPushButton:hover {
+        background-color: #d32f2f;
+    }
+    QPushButton:pressed {
+        background-color: #b71c1c;
+    }
+"""
+
+STYLE_RUN_CANCELLING = """
+    QPushButton {
+        font-weight: bold;
+        font-size: 13px;
+        background-color: #616161;
+        color: #e0e0e0;
+        border-radius: 4px;
+    }
+"""
 
 
 class StartrailsTab(QWidget):
@@ -278,6 +333,54 @@ class StartrailsTab(QWidget):
         self.container_streaks.setVisible(False)
         modes_layout.addWidget(self.container_streaks)
 
+        # Relleno de pausas entre tomas (Gap Filling)
+        self.chk_fill_gaps = QCheckBox("✨ Rellenar pausas entre tomas (Gap Filling)")
+        self.chk_fill_gaps.setStyleSheet("font-weight: bold; color: #ffb74d;")
+        self.chk_fill_gaps.setToolTip(
+            "Elimina la apariencia de línea punteada o saltos conectando de forma continua\n"
+            "las estrellas entre fotogramas consecutivos."
+        )
+        self.chk_fill_gaps.toggled.connect(self._on_fill_gaps_toggled)
+        modes_layout.addWidget(self.chk_fill_gaps)
+
+        self.container_gaps = QWidget()
+        gaps_layout = QVBoxLayout(self.container_gaps)
+        gaps_layout.setContentsMargins(16, 2, 4, 4)
+        gaps_layout.setSpacing(6)
+
+        row_gap_radius = QHBoxLayout()
+        row_gap_radius.addWidget(QLabel("Radio del salto (px):"))
+        self.lbl_gap_radius_val = QLabel("2 px")
+        self.lbl_gap_radius_val.setStyleSheet("color: #ffb74d; font-weight: bold;")
+        row_gap_radius.addWidget(self.lbl_gap_radius_val)
+        row_gap_radius.addStretch()
+        gaps_layout.addLayout(row_gap_radius)
+
+        self.slider_gap_radius = QSlider(Qt.Horizontal)
+        self.slider_gap_radius.setRange(1, 4)
+        self.slider_gap_radius.setValue(2)
+        self.slider_gap_radius.setToolTip("1–2 px para pausas de intervalómetro de 1–2s; 3–4 px para pausas mayores.")
+        self.slider_gap_radius.valueChanged.connect(lambda v: self.lbl_gap_radius_val.setText(f"{v} px"))
+        gaps_layout.addWidget(self.slider_gap_radius)
+
+        lbl_gap_hint = QLabel("💡 1–2 px cierra huecos sin engrosar trazas; valores mayores ensanchan las estrellas.")
+        lbl_gap_hint.setStyleSheet("color: #90a4ae; font-size: 10px; font-style: italic;")
+        lbl_gap_hint.setWordWrap(True)
+        gaps_layout.addWidget(lbl_gap_hint)
+
+        row_gap_sens = QHBoxLayout()
+        row_gap_sens.addWidget(QLabel("Umbral estelar:"))
+        self.combo_gap_sens = QComboBox()
+        self.combo_gap_sens.addItem("Equilibrado / Automático (Recomendado)", 3.0)
+        self.combo_gap_sens.addItem("Permisivo (Incluir estrellas tenues)", 2.0)
+        self.combo_gap_sens.addItem("Conservador (Solo estrellas brillantes)", 4.5)
+        self.combo_gap_sens.setCurrentIndex(0)
+        row_gap_sens.addWidget(self.combo_gap_sens)
+        gaps_layout.addLayout(row_gap_sens)
+
+        self.container_gaps.setVisible(False)
+        modes_layout.addWidget(self.container_gaps)
+
         left_layout.addWidget(grp_modes)
 
         # 3. GRUPO: FUSIÓN DE SUELO LIMPIO (ANTI-RUIDO)
@@ -386,8 +489,8 @@ class StartrailsTab(QWidget):
         roadmap_layout.addWidget(lbl_rm_title)
 
         lbl_rm_desc = QLabel(
-            "• Relleno continuo de saltos entre tomas (Gap Filling)\n"
-            "• Generación de secuencia acumulativa para vídeo Time-Lapse"
+            "• Generación de secuencia acumulativa para vídeo Time-Lapse\n"
+            "• Realce y balance cromático de trazas estelares"
         )
         lbl_rm_desc.setStyleSheet("color: #8c8c9e; font-size: 10px; line-height: 140%;")
         roadmap_layout.addWidget(lbl_rm_desc)
@@ -432,24 +535,10 @@ class StartrailsTab(QWidget):
         )
         left_container_layout.addWidget(self.txt_log)
 
-        self.btn_run = QPushButton("⚡ Generar Trazas de Estrellas (Startrails)")
+        self.btn_run = QPushButton()
         self.btn_run.setFixedHeight(42)
         self.btn_run.setCursor(Qt.PointingHandCursor)
-        self.btn_run.setStyleSheet("""
-            QPushButton {
-                font-weight: bold;
-                font-size: 13px;
-                background-color: #2e7d32;
-                color: white;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #388e3c;
-            }
-            QPushButton:pressed {
-                background-color: #1b5e20;
-            }
-        """)
+        self._set_run_button_state("idle")
         self.btn_run.clicked.connect(self._on_run_clicked)
         left_container_layout.addWidget(self.btn_run)
 
@@ -462,7 +551,7 @@ class StartrailsTab(QWidget):
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 10)
-        splitter.setSizes([450, 1400])
+        splitter.setSizes([520, 1400])
 
         main_layout.addWidget(splitter)
 
@@ -550,6 +639,10 @@ class StartrailsTab(QWidget):
     def _on_suppress_streaks_toggled(self, checked: bool) -> None:
         """Muestra u oculta los controles de sensibilidad para la supresión de satélites y aviones."""
         self.container_streaks.setVisible(checked)
+
+    def _on_fill_gaps_toggled(self, checked: bool) -> None:
+        """Muestra u oculta los controles de ajuste de Gap Filling."""
+        self.container_gaps.setVisible(checked)
 
     def _on_clean_ground_toggled(self, checked: bool) -> None:
         """Habilita o deshabilita los controles de integración de suelo limpio."""
@@ -729,8 +822,40 @@ class StartrailsTab(QWidget):
         else:
             self.canvas.set_mask_visible(False)
 
+    def _set_run_button_state(self, state: str) -> None:
+        """Configura el texto, estilo y disponibilidad del botón principal de ejecución."""
+        if state == "running":
+            self.btn_run.setText("🛑 CANCELAR PROCESAMIENTO")
+            self.btn_run.setStyleSheet(STYLE_RUN_ACTIVE)
+            self.btn_run.setEnabled(True)
+        elif state == "cancelling":
+            self.btn_run.setText("⏳ Cancelando procesamiento...")
+            self.btn_run.setStyleSheet(STYLE_RUN_CANCELLING)
+            self.btn_run.setEnabled(False)
+        else: # idle
+            self.btn_run.setText("⚡ Generar Trazas de Estrellas (Startrails)")
+            self.btn_run.setStyleSheet(STYLE_RUN_IDLE)
+            self.btn_run.setEnabled(True)
+
+    def _cancel_processing(self) -> None:
+        """Solicita la detención inmediata del procesamiento en segundo plano."""
+        if self.worker is not None and self.worker.isRunning():
+            self._set_run_button_state("cancelling")
+            self.log("Cancelación solicitada por el usuario. Deteniendo procesos...")
+            self.worker.cancel()
+
+    def _on_worker_cancelled(self) -> None:
+        """Maneja la confirmación de cancelación del worker."""
+        self._set_run_button_state("idle")
+        self.progress_bar.setVisible(False)
+        self.log("Procesamiento de trazas cancelado por el usuario.")
+
     def _on_run_clicked(self) -> None:
-        """Dispara la generación del Startrail en segundo plano."""
+        """Dispara la generación del Startrail en segundo plano o cancela si está en curso."""
+        if self.worker is not None and self.worker.isRunning():
+            self._cancel_processing()
+            return
+
         if not self.files_list:
             QMessageBox.warning(self, "Atención", "Debes cargar al menos dos tomas para generar trazas.")
             return
@@ -768,11 +893,13 @@ class StartrailsTab(QWidget):
             "ref_idx": self.ref_idx,
             "feather_radius": self.slider_feather.value(),
             "suppress_streaks": self.chk_suppress_streaks.isChecked(),
-            "streak_sensitivity": float(self.combo_streak_sens.currentData() or 0.5)
+            "streak_sensitivity": float(self.combo_streak_sens.currentData() or 0.5),
+            "fill_gaps": self.chk_fill_gaps.isChecked(),
+            "gap_fill_radius": self.slider_gap_radius.value(),
+            "gap_fill_threshold_factor": float(self.combo_gap_sens.currentData() or 3.0)
         }
 
-        self.btn_run.setEnabled(False)
-        self.btn_run.setText("⏳ Procesando Trazas...")
+        self._set_run_button_state("running")
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.log(f"Iniciando cálculo de trazas en modo: {mode.upper()}...")
@@ -780,6 +907,7 @@ class StartrailsTab(QWidget):
         self.worker = StartrailWorker(params)
         self.worker.progress.connect(self._on_worker_progress)
         self.worker.finished.connect(self._on_worker_finished)
+        self.worker.cancelled.connect(self._on_worker_cancelled)
         self.worker.error.connect(self._on_worker_error)
         self.worker.start()
 
@@ -789,8 +917,7 @@ class StartrailsTab(QWidget):
             self.log(msg)
 
     def _on_worker_finished(self, result: np.ndarray, task_type: str) -> None:
-        self.btn_run.setEnabled(True)
-        self.btn_run.setText("⚡ Generar Trazas de Estrellas (Startrails)")
+        self._set_run_button_state("idle")
         self.progress_bar.setValue(100)
         self.progress_bar.setVisible(False)
 
@@ -800,8 +927,7 @@ class StartrailsTab(QWidget):
         self.log("Trazas de estrellas compuestas y renderizadas en el visor.")
 
     def _on_worker_error(self, err_msg: str) -> None:
-        self.btn_run.setEnabled(True)
-        self.btn_run.setText("⚡ Generar Trazas de Estrellas (Startrails)")
+        self._set_run_button_state("idle")
         self.progress_bar.setVisible(False)
         self.log(f"ERROR: {err_msg}")
         QMessageBox.critical(self, "Error de Procesado", f"Ocurrió un error al generar las trazas:\n{err_msg}")

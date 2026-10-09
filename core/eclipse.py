@@ -249,9 +249,9 @@ def detect_eclipse_disk(
         gray = image.copy()
     gray = gray.astype(np.float32)
 
-    # Coarse detection via downsampled image (800 px max)
-    scale = 800.0 / max(h, w)
-    small_w, small_h = int(w * scale), int(h * scale)
+    # Coarse detection via downsampled image (1000 px max, sin sobreescalar)
+    scale = min(1.0, 1000.0 / float(max(h, w)))
+    small_w, small_h = max(1, int(w * scale)), max(1, int(h * scale))
     small_gray = cv2.resize(gray, (small_w, small_h), interpolation=cv2.INTER_AREA)
 
     init_cx, init_cy, init_r = None, None, None
@@ -278,16 +278,62 @@ def detect_eclipse_disk(
                 init_cy = float(hcy / scale)
                 init_r = float(hr / scale)
     else:
-        # En eclipse lunar, la Luna es el objeto brillante
-        thresh = np.percentile(small_gray, 80)
-        bright = (small_gray > thresh).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            (hcx, hcy), hr = cv2.minEnclosingCircle(largest)
-            init_cx = float(hcx / scale)
-            init_cy = float(hcy / scale)
-            init_r = float(hr / scale)
+        # En eclipse lunar, la Luna es el objeto brillante circular.
+        # Evitamos percentiles globales fijos (p80) que seleccionan nubes o resplandor difuso.
+        small_u8 = np.clip(small_gray, 0, 255).astype(np.uint8) if small_gray.max() > 1.5 else np.clip(small_gray * 255.0, 0, 255).astype(np.uint8)
+
+        # 1. Localizar el punto de brillo lunar máximo (filtrando ruido puntual con Gaussiano)
+        peak_blur = cv2.GaussianBlur(small_u8, (31, 31), 0)
+        _, _, _, (peak_x, peak_y) = cv2.minMaxLoc(peak_blur)
+
+        # 2. Detección de círculos mediante transformada de Hough multiescala/gradiente
+        blur = cv2.GaussianBlur(small_u8, (9, 9), 2)
+        min_r = max(5, int(15 * scale))
+        max_r = max(min_r + 20, int(min(small_w, small_h) * 0.45))
+
+        for p2 in [35, 28, 22, 16, 12]:
+            circles = cv2.HoughCircles(
+                blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=max(10, int(20 * scale)),
+                param1=80, param2=p2, minRadius=min_r, maxRadius=max_r
+            )
+            if circles is not None and len(circles[0]) > 0:
+                cands = circles[0]
+                # Priorizar el círculo que contenga o esté más próximo a la zona de brillo lunar
+                valid_cands = []
+                for c in cands:
+                    cx_c, cy_c, r_c = c[0], c[1], c[2]
+                    dist = np.hypot(cx_c - peak_x, cy_c - peak_y)
+                    if dist <= max(r_c * 1.6, 40.0):
+                        valid_cands.append((dist, cx_c, cy_c, r_c))
+                if valid_cands:
+                    valid_cands.sort(key=lambda item: item[0])
+                    best = valid_cands[0]
+                    init_cx = float(best[1] / scale)
+                    init_cy = float(best[2] / scale)
+                    init_r = float(best[3] / scale)
+                    break
+                best = min(cands, key=lambda c: np.hypot(c[0] - small_w / 2, c[1] - small_h / 2))
+                init_cx = float(best[0] / scale)
+                init_cy = float(best[1] / scale)
+                init_r = float(best[2] / scale)
+                break
+
+        # 3. Fallback: umbralización de Otsu en una ventana local centrada en el brillo lunar
+        if init_cx is None:
+            roi_size = int(max(min(small_w, small_h) * 0.3, 100))
+            x0 = max(0, peak_x - roi_size)
+            y0 = max(0, peak_y - roi_size)
+            x1 = min(small_w, peak_x + roi_size)
+            y1 = min(small_h, peak_y + roi_size)
+            roi = small_u8[y0:y1, x0:x1]
+            _, roi_thresh = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            cnts, _ = cv2.findContours(roi_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if cnts:
+                c_best = max(cnts, key=cv2.contourArea)
+                (hcx, hcy), hr = cv2.minEnclosingCircle(c_best)
+                init_cx = float((hcx + x0) / scale)
+                init_cy = float((hcy + y0) / scale)
+                init_r = float(hr / scale)
 
     if init_cx is None or init_r is None or init_r < 10:
         # Fallback a centro de imagen si no se encuentra hueco/contorno
@@ -343,7 +389,8 @@ def register_frame_to_center(
     image: np.ndarray,
     current_center: Tuple[float, float],
     target_center: Tuple[float, float],
-    interpolation: int = cv2.INTER_LANCZOS4
+    interpolation: int = cv2.INTER_LANCZOS4,
+    border_mode: int = cv2.BORDER_REPLICATE
 ) -> np.ndarray:
     """
     Desplaza una toma mediante transformación afín subpíxel para que su centro
@@ -363,8 +410,7 @@ def register_frame_to_center(
         matrix,
         (w, h),
         flags=interpolation,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
+        borderMode=border_mode
     )
 
 
@@ -391,7 +437,7 @@ def align_eclipse_bracketing(
         if abs(dx) < 1e-4 and abs(dy) < 1e-4:
             aligned_images.append(img.copy())
         else:
-            aligned = register_frame_to_center(img, c, ref_center)
+            aligned = register_frame_to_center(img, c, ref_center, border_mode=cv2.BORDER_REPLICATE)
             aligned_images.append(aligned)
 
     return aligned_images, shifts
@@ -427,14 +473,45 @@ def fuse_hdr_bracketing(
     exposures_s: List[float],
     saturation_threshold: float = 0.90,
     noise_floor: float = 0.015,
-    asinh_stretch: float = 0.0
+    asinh_stretch: float = 0.0,
+    mode: str = "solar"
 ) -> np.ndarray:
     """
-    Fusión lineal de alto rango dinámico (HDR) para tomas de bracketing con
-    opción de estirado Asinh para levantar la corona externa.
+    Fusión de alto rango dinámico (HDR) para tomas de bracketing de eclipses.
+    - Modo solar: Fusión lineal fotométrica ponderada de flujo (flux = img / t),
+      ideal para la corona continua y filtros NRGF.
+    - Modo lunar: Fusión por exposición multiescala (Mertens-Kautz-Van Reeth),
+      óptima para el contraste extremo entre la zona iluminada y la umbra rojiza,
+      preservando textura de cráteres y color sin quemar ni empastar.
     """
     if not images or len(images) != len(exposures_s):
         raise ValueError("La lista de imágenes y tiempos de exposición debe ser consistente.")
+
+    if mode == "lunar":
+        imgs_for_mertens = []
+        for img in images:
+            if img.dtype == np.uint8:
+                c_img = img
+            else:
+                max_v = float(img.max()) if img.size > 0 else 1.0
+                if max_v <= 1.05:
+                    c_img = np.clip(img * 255.0, 0.0, 255.0).astype(np.uint8)
+                else:
+                    c_img = np.clip(img, 0.0, 255.0).astype(np.uint8)
+            imgs_for_mertens.append(c_img)
+
+        mertens = cv2.createMergeMertens(
+            contrast_weight=1.0,
+            saturation_weight=1.0,
+            exposure_weight=1.0
+        )
+        fused = mertens.process(imgs_for_mertens)
+        fused = np.clip(fused, 0.0, 1.0).astype(np.float32)
+
+        if asinh_stretch > 1.0:
+            fused = apply_asinh_stretch(fused, stretch_factor=asinh_stretch)
+
+        return fused
 
     order = np.argsort(exposures_s)
     sorted_images = [np.asarray(images[i], dtype=np.float32) for i in order]

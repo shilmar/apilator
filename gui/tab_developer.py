@@ -93,6 +93,7 @@ class DeveloperTab(QWidget):
         self.denoise_strength = 0.0  # <-- CORREGIDO: Inicialización obligatoria
 
         self._setup_ui()
+        self._apply_styles()
         
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -109,12 +110,12 @@ class DeveloperTab(QWidget):
         # 2. Panel interno de controles
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setContentsMargins(4, 4, 10, 4)
         left_layout.setSpacing(12)
 
         # Carga externa
         self.btn_open_img = QPushButton("📁 Abrir Imagen (TIFF / FITS / RAW)...")
-        self.btn_open_img.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.btn_open_img.setStyleSheet("font-weight: bold; color: #80d8ff; padding: 7px;")
         self.btn_open_img.clicked.connect(self.open_image_file)
         left_layout.addWidget(self.btn_open_img)
 
@@ -141,7 +142,7 @@ class DeveloperTab(QWidget):
         layout_bg.addLayout(row_engine)
 
         self.btn_extract_bg = QPushButton("⚡ Eliminar Gradientes")
-        self.btn_extract_bg.setStyleSheet("font-weight: bold;")
+        self.btn_extract_bg.setStyleSheet("font-weight: bold; color: #80d8ff;")
         self.btn_extract_bg.clicked.connect(self.on_extract_background_clicked)
         layout_bg.addWidget(self.btn_extract_bg)
 
@@ -150,14 +151,15 @@ class DeveloperTab(QWidget):
         row_lp.addWidget(QLabel("Atenuar Cúpula de Luz:"))
         self.lbl_lp = QLabel("0%")
         self.lbl_lp.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        self.lbl_lp.setMinimumWidth(38)
         row_lp.addWidget(self.lbl_lp)
-        layout_bg.addLayout(row_lp)
-
+        row_lp.addSpacing(6)
         self.slider_lp = QSlider(Qt.Horizontal)
         self.slider_lp.setRange(0, 100)
         self.slider_lp.setValue(0)
         self.slider_lp.valueChanged.connect(self.on_lp_changed)
-        layout_bg.addWidget(self.slider_lp)
+        row_lp.addWidget(self.slider_lp, stretch=1)
+        layout_bg.addLayout(row_lp)
 
         left_layout.addWidget(grp_bg)
 
@@ -579,18 +581,21 @@ class DeveloperTab(QWidget):
         left_layout.addWidget(grp_gnd_tone)
 
         # --- SECCIÓN 7: Exportación ---
-        self.btn_export = QPushButton("💾 Exportar Imagen Revelada...")
-        self.btn_export.setFixedHeight(42)
+        self.btn_export = QPushButton("💾 EXPORTAR IMAGEN REVELADA...")
+        self.btn_export.setFixedHeight(44)
+        self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.setStyleSheet("""
             QPushButton {
                 font-weight: bold;
                 font-size: 13px;
-                background-color: #2e6648;
+                background-color: #2e7d32;
                 color: white;
                 border-radius: 6px;
+                border: 1px solid #388e3c;
             }
             QPushButton:hover {
                 background-color: #388e3c;
+                border-color: #4caf50;
             }
             QPushButton:pressed {
                 background-color: #1b5e20;
@@ -606,20 +611,14 @@ class DeveloperTab(QWidget):
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll_area.setWidget(left_panel)
-        scroll_area.setStyleSheet("""
-            QScrollArea { border: none; background-color: transparent; }
-            QScrollBar:vertical { background: #1e1e1e; width: 8px; margin: 0px; border-radius: 4px; }
-            QScrollBar::handle:vertical { background: #4a4a4a; min-height: 25px; border-radius: 4px; }
-            QScrollBar::handle:vertical:hover { background: #606060; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }            
-        """)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         left_container = QWidget()
         left_container_layout = QVBoxLayout(left_container)
-        left_container_layout.setContentsMargins(8, 8, 8, 8)
+        left_container_layout.setContentsMargins(4, 4, 4, 4)
         left_container_layout.setSpacing(6)
-        left_container.setMinimumWidth(410)
-        left_container.setMaximumWidth(500)
+        left_container.setMinimumWidth(420)
+        left_container.setMaximumWidth(520)
 
         left_container_layout.addWidget(scroll_area, 1)
 
@@ -631,9 +630,9 @@ class DeveloperTab(QWidget):
         self.txt_log.setReadOnly(True)
         self.txt_log.setFixedHeight(100)
         self.txt_log.setStyleSheet(
-            "background-color: #141414; color: #a5d6a7; "
+            "background-color: #141418; color: #a5d6a7; "
             "font-family: Consolas, monospace; font-size: 11px; "
-            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
+            "border: 1px solid #2d2d3a; border-radius: 4px; padding: 4px;"
         )
         left_container_layout.addWidget(self.txt_log, 0)
 
@@ -641,9 +640,114 @@ class DeveloperTab(QWidget):
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 10)
-        splitter.setSizes([450, 1400])
+        splitter.setSizes([520, 1400])
         
         layout.addWidget(splitter)
+
+    def _apply_styles(self) -> None:
+        """Aplica la hoja de estilos unificada consistente con el módulo de Startrails, Stacker y Ajustes."""
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #2d2d3a;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 14px;
+                background-color: #1a1a22;
+                color: #e0e0e0;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 4px;
+                color: #90caf9;
+            }
+            QPushButton {
+                background-color: #252530;
+                border: 1px solid #3a3a4c;
+                border-radius: 4px;
+                padding: 5px 10px;
+                color: #e0e0e0;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #2f2f3d;
+                border-color: #55556a;
+            }
+            QPushButton:pressed {
+                background-color: #1c1c24;
+            }
+            QComboBox {
+                background-color: #121216;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #f0f0f0;
+            }
+            QComboBox:focus {
+                border: 1px solid #0288d1;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a22;
+                selection-background-color: #1976d2;
+                color: #ffffff;
+                border: 1px solid #3a3a4c;
+            }
+            QSpinBox, QDoubleSpinBox {
+                background-color: #121216;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 3px 6px;
+                color: #f0f0f0;
+            }
+            QSpinBox:focus, QDoubleSpinBox:focus {
+                border: 1px solid #0288d1;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #2d2d3a;
+                height: 4px;
+                background: #14141a;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #0288d1;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #80d8ff;
+                border: 1px solid #0288d1;
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+            QCheckBox, QRadioButton {
+                color: #e0e0e0;
+                font-size: 11px;
+                spacing: 6px;
+            }
+            QScrollBar:vertical {
+                background: #121216;
+                width: 8px;
+                margin: 0;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #2f2f3d;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3d3d52;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
 
     def log_message(self, text: str):
         self.txt_log.append(text)
@@ -683,6 +787,9 @@ class DeveloperTab(QWidget):
                 self.proxy_stars = np.ascontiguousarray(
                     cv2.resize(self.image_stars, (pw, ph), interpolation=cv2.INTER_AREA), dtype=np.float32
                 )
+            else:
+                self.proxy_starless = None
+                self.proxy_stars = None
 
             if clean_mask is not None:
                 m_small = cv2.resize(clean_mask, (pw, ph), interpolation=cv2.INTER_LINEAR)
@@ -711,10 +818,15 @@ class DeveloperTab(QWidget):
         self.current_mask = mask
         self.image_starless = None
         self.image_stars = None
-        self.combo_layer.setEnabled(False)
-        self.slider_stars.setEnabled(False)
+        self.proxy_starless = None
+        self.proxy_stars = None
+        self.proxy_mask = None
+        self.preview_proxy = None
         
         self.reset_all_parameters()
+        self._set_starnet_tools_enabled(False)
+        self.combo_layer.setEnabled(False)
+        self.slider_stars.setEnabled(False)
         
         self.log_message(f"Cargando imagen: {os.path.basename(filepath)}...")
         self.slider_contrast_starless.setEnabled(False)

@@ -86,6 +86,7 @@ class StackerTab(QWidget):
         self.worker = None
 
         self._setup_ui()
+        self._apply_styles()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -100,10 +101,10 @@ class StackerTab(QWidget):
 
         # 2. Panel lateral (Scrollable con Log y Ejecución Fijos Abajo)
         left_panel = QWidget()
-        left_panel.setMinimumWidth(410)
-        left_panel.setMaximumWidth(500)
+        left_panel.setMinimumWidth(420)
+        left_panel.setMaximumWidth(520)
         left_panel_layout = QVBoxLayout(left_panel)
-        left_panel_layout.setContentsMargins(8, 8, 8, 8)
+        left_panel_layout.setContentsMargins(4, 4, 4, 4)
         left_panel_layout.setSpacing(6)
 
         scroll_area = QScrollArea()
@@ -113,12 +114,14 @@ class StackerTab(QWidget):
 
         panel_content = QWidget()
         left_layout = QVBoxLayout(panel_content)
-        left_layout.setContentsMargins(2, 2, 8, 2)
-        left_layout.setSpacing(10)
+        left_layout.setContentsMargins(4, 4, 10, 4)
+        left_layout.setSpacing(12)
 
         # SECCIÓN 1: Gestión de Sesión / Proyecto
         self.grp_project = QGroupBox("1. Sesión y Proyecto (.mwstack)")
         proj_layout = QVBoxLayout(self.grp_project)
+        proj_layout.setContentsMargins(10, 14, 10, 10)
+        proj_layout.setSpacing(8)
         
         self.lbl_session = QLabel("Sesión: Sin guardar")
         self.lbl_session.setStyleSheet("color: #80cbc4; font-size: 11px; font-weight: bold;")
@@ -134,10 +137,15 @@ class StackerTab(QWidget):
         btn_proj_row.addWidget(self.btn_new_sess)
 
         self.btn_open_sess = QPushButton("📁 Cargar")
+        self.btn_open_sess.setStyleSheet("font-weight: bold; color: #80d8ff;")
         self.btn_open_sess.clicked.connect(self.open_project)
+
         self.btn_save_sess = QPushButton("💾 Guardar")
+        self.btn_save_sess.setStyleSheet("font-weight: bold; color: #a5d6a7;")
         self.btn_save_sess.clicked.connect(self.save_project)
+
         self.btn_save_as_sess = QPushButton("💾 Guardar Como...")
+        self.btn_save_as_sess.setStyleSheet("font-weight: bold; color: #cfd8dc;")
         self.btn_save_as_sess.clicked.connect(self.save_project_as)
 
         btn_proj_row.addWidget(self.btn_open_sess)
@@ -149,6 +157,8 @@ class StackerTab(QWidget):
         # SECCIÓN 2: Pestañas de Archivos (Lights / Darks / Flats / Suelo)
         self.grp_files = QGroupBox("2. Calibración y Tomas")
         files_layout = QVBoxLayout(self.grp_files)
+        files_layout.setContentsMargins(10, 14, 10, 10)
+        files_layout.setSpacing(8)
 
         self.tabs_files = QTabWidget()
         self.tabs_files.setMinimumHeight(160)
@@ -178,6 +188,7 @@ class StackerTab(QWidget):
         self.btn_add_files.setStyleSheet("font-weight: bold; color: #80d8ff;")
         self.btn_add_files.clicked.connect(self.add_current_tab_files)
         self.btn_clear_files = QPushButton("🗑️ Limpiar Pestaña")
+        self.btn_clear_files.setStyleSheet("font-weight: bold; color: #ff8a80;")
         self.btn_clear_files.clicked.connect(self.clear_current_tab_files)
         btn_box.addWidget(self.btn_add_files)
         btn_box.addWidget(self.btn_clear_files)
@@ -188,23 +199,32 @@ class StackerTab(QWidget):
         # SECCIÓN 3: Parámetros de Integración
         self.grp_settings = QGroupBox("3. Parámetros de Integración")
         set_layout = QVBoxLayout(self.grp_settings)
-        set_layout.setSpacing(6)
+        set_layout.setContentsMargins(10, 14, 10, 10)
+        set_layout.setSpacing(8)
 
-        set_layout.addWidget(QLabel("Modo de Captura:"))
+        row_mode = QHBoxLayout()
+        lbl_mode = QLabel("Modo de Captura:")
+        lbl_mode.setMinimumWidth(140)
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Trípode Fijo (Suelo Estático)", "Star Tracker (Seguimiento)"])
         self.combo_mode.currentIndexChanged.connect(self._on_capture_mode_changed)
-        set_layout.addWidget(self.combo_mode)
+        row_mode.addWidget(lbl_mode)
+        row_mode.addWidget(self.combo_mode)
+        set_layout.addLayout(row_mode)
 
         # Tratamiento del Suelo
-        set_layout.addWidget(QLabel("Tratamiento del Suelo:"))
+        row_ground = QHBoxLayout()
+        lbl_ground = QLabel("Tratamiento del Suelo:")
+        lbl_ground.setMinimumWidth(140)
         self.combo_ground = QComboBox()
         self.combo_ground.addItems([
             "Apilar Suelo Completo (Dual)",
             "Suelo de Referencia (Sin apilar)",
             "Usar Toma de Pestaña Suelo"
         ])
-        set_layout.addWidget(self.combo_ground)
+        row_ground.addWidget(lbl_ground)
+        row_ground.addWidget(self.combo_ground)
+        set_layout.addLayout(row_ground)
 
         row_kappa = QHBoxLayout()
         row_kappa.addWidget(QLabel("Factor Kappa (MAD Rejection):"))
@@ -221,7 +241,8 @@ class StackerTab(QWidget):
         # SECCIÓN 4: Antipolución en Apilado
         self.grp_stack_lp = QGroupBox("4. Reducción de Polución Lumínica")
         layout_stack_lp = QVBoxLayout(self.grp_stack_lp)
-        layout_stack_lp.setSpacing(6)
+        layout_stack_lp.setContentsMargins(10, 14, 10, 10)
+        layout_stack_lp.setSpacing(8)
 
         row_lp_algo = QHBoxLayout()
         row_lp_algo.addWidget(QLabel("Algoritmo:"))
@@ -253,7 +274,8 @@ class StackerTab(QWidget):
         # SECCIÓN 5: Máscara Cielo / Suelo
         self.grp_mask = QGroupBox("5. Segmentación Cielo / Suelo (Máscara)")
         mask_layout = QVBoxLayout(self.grp_mask)
-        mask_layout.setSpacing(6)
+        mask_layout.setContentsMargins(10, 14, 10, 10)
+        mask_layout.setSpacing(8)
 
         row_mask_toggles = QHBoxLayout()
         self.chk_show_mask = QCheckBox("👁️ Mostrar Máscara")
@@ -276,17 +298,19 @@ class StackerTab(QWidget):
         mask_layout.addWidget(self.rb_sky)
         mask_layout.addWidget(self.rb_ground)
 
-        row_brush_info = QHBoxLayout()
-        self.lbl_brush = QLabel("Tamaño de Cursor: 40 px")
+        row_brush = QHBoxLayout()
+        row_brush.addWidget(QLabel("Tamaño de Cursor:"))
+        self.lbl_brush = QLabel("40 px")
         self.lbl_brush.setStyleSheet("color: #80d8ff; font-weight: bold;")
-        row_brush_info.addWidget(self.lbl_brush)
-        mask_layout.addLayout(row_brush_info)
-
+        self.lbl_brush.setMinimumWidth(45)
+        row_brush.addWidget(self.lbl_brush)
+        row_brush.addSpacing(6)
         self.slider_brush = QSlider(Qt.Horizontal)
         self.slider_brush.setRange(5, 120)
         self.slider_brush.setValue(20)
         self.slider_brush.valueChanged.connect(self.update_brush_slider)
-        mask_layout.addWidget(self.slider_brush)
+        row_brush.addWidget(self.slider_brush, stretch=1)
+        mask_layout.addLayout(row_brush)
 
         # Controles de Refinamiento
         row_params = QHBoxLayout()
@@ -312,7 +336,7 @@ class StackerTab(QWidget):
         self.btn_refine.setStyleSheet("font-weight: bold; color: #b388ff; padding: 5px;")
         self.btn_refine.clicked.connect(self.refine_mask)
         self.btn_clear_m = QPushButton("🗑️ Limpiar Máscara")
-        self.btn_clear_m.setStyleSheet("color: #ff8a80;")
+        self.btn_clear_m.setStyleSheet("font-weight: bold; color: #ff8a80;")
         self.btn_clear_m.clicked.connect(self.clear_mask)
         btn_mask_actions.addWidget(self.btn_refine)
         btn_mask_actions.addWidget(self.btn_clear_m)
@@ -321,8 +345,10 @@ class StackerTab(QWidget):
         btn_mask_io = QHBoxLayout()
         btn_mask_io.setSpacing(6)
         self.btn_load_m = QPushButton("📁 Cargar PNG")
+        self.btn_load_m.setStyleSheet("font-weight: bold; color: #80cbc4;")
         self.btn_load_m.clicked.connect(self.load_mask)
         self.btn_save_m = QPushButton("💾 Exportar PNG")
+        self.btn_save_m.setStyleSheet("font-weight: bold; color: #90caf9;")
         self.btn_save_m.clicked.connect(self.save_mask)
         btn_mask_io.addWidget(self.btn_load_m)
         btn_mask_io.addWidget(self.btn_save_m)
@@ -343,23 +369,23 @@ class StackerTab(QWidget):
         self.txt_log.setReadOnly(True)
         self.txt_log.setFixedHeight(100)
         self.txt_log.setStyleSheet(
-            "background-color: #141414; color: #a5d6a7; "
+            "background-color: #141418; color: #a5d6a7; "
             "font-family: Consolas, monospace; font-size: 11px; "
-            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
+            "border: 1px solid #2d2d3a; border-radius: 4px; padding: 4px;"
         )
         left_panel_layout.addWidget(self.txt_log)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedHeight(18)
+        self.progress_bar.setFixedHeight(16)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setValue(0)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #333333;
+                border: 1px solid #2d2d3a;
                 border-radius: 3px;
                 text-align: center;
                 font-size: 10px;
-                background-color: #1a1a1a;
+                background-color: #141418;
                 color: #ffffff;
             }
             QProgressBar::chunk {
@@ -369,20 +395,23 @@ class StackerTab(QWidget):
         left_panel_layout.addWidget(self.progress_bar)
 
         self.btn_run = QPushButton("🚀 INICIAR APILADO DUAL")
-        self.btn_run.setFixedHeight(46)
+        self.btn_run.setFixedHeight(44)
+        self.btn_run.setCursor(Qt.PointingHandCursor)
         self.btn_run.setStyleSheet("""
             QPushButton {
                 font-weight: bold;
                 font-size: 13px;
-                background-color: #1976d2;
+                background-color: #1565c0;
                 color: white;
                 border-radius: 6px;
+                border: 1px solid #1976d2;
             }
             QPushButton:hover {
-                background-color: #1e88e5;
+                background-color: #1976d2;
+                border-color: #42a5f5;
             }
             QPushButton:pressed {
-                background-color: #1565c0;
+                background-color: #0d47a1;
             }
         """)
         self.btn_run.clicked.connect(self._on_btn_run_clicked)
@@ -392,7 +421,157 @@ class StackerTab(QWidget):
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 10)
+        splitter.setSizes([520, 1400])
         layout.addWidget(splitter)
+
+    def _apply_styles(self) -> None:
+        """Aplica la hoja de estilos unificada consistente con el módulo de Startrails y Ajustes."""
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #2d2d3a;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 14px;
+                background-color: #1a1a22;
+                color: #e0e0e0;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 4px;
+                color: #90caf9;
+            }
+            QTabWidget::pane {
+                border: 1px solid #2d2d3a;
+                background-color: #14141a;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #1f1f28;
+                color: #90a4ae;
+                padding: 5px 10px;
+                border: 1px solid #2d2d3a;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-size: 11px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #282838;
+                color: #80d8ff;
+                font-weight: bold;
+                border-color: #3d3d52;
+            }
+            QTabBar::tab:hover {
+                background-color: #252532;
+                color: #e0e0e0;
+            }
+            QListWidget {
+                background-color: #14141a;
+                border: 1px solid #262633;
+                border-radius: 4px;
+                color: #ffffff;
+                font-size: 11px;
+            }
+            QListWidget::item {
+                padding: 2px;
+                border-bottom: 1px solid #1a1a24;
+            }
+            QListWidget::item:selected {
+                background-color: #1b384d;
+                color: #80d8ff;
+            }
+            QListWidget::item:hover {
+                background-color: #1f2530;
+            }
+            QPushButton {
+                background-color: #252530;
+                border: 1px solid #3a3a4c;
+                border-radius: 4px;
+                padding: 5px 10px;
+                color: #e0e0e0;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #2f2f3d;
+                border-color: #55556a;
+            }
+            QPushButton:pressed {
+                background-color: #1c1c24;
+            }
+            QComboBox {
+                background-color: #121216;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #f0f0f0;
+            }
+            QComboBox:focus {
+                border: 1px solid #0288d1;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a22;
+                selection-background-color: #1976d2;
+                color: #ffffff;
+                border: 1px solid #3a3a4c;
+            }
+            QSpinBox, QDoubleSpinBox {
+                background-color: #121216;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 3px 6px;
+                color: #f0f0f0;
+            }
+            QSpinBox:focus, QDoubleSpinBox:focus {
+                border: 1px solid #0288d1;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #2d2d3a;
+                height: 4px;
+                background: #14141a;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #0288d1;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #80d8ff;
+                border: 1px solid #0288d1;
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+            QCheckBox, QRadioButton {
+                color: #e0e0e0;
+                font-size: 11px;
+                spacing: 6px;
+            }
+            QScrollBar:vertical {
+                background: #121216;
+                width: 8px;
+                margin: 0;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #2f2f3d;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3d3d52;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
 
     def log_message(self, text: str):
         self.txt_log.append(text)
@@ -572,13 +751,13 @@ class StackerTab(QWidget):
 
     def update_brush_slider(self, val):
         self.canvas.set_brush_radius(val)
-        self.lbl_brush.setText(f"Tamaño de Cursor: {val * 2} px")
+        self.lbl_brush.setText(f"{val * 2} px")
 
     def on_canvas_brush_changed(self, radius):
         self.slider_brush.blockSignals(True)
         self.slider_brush.setValue(radius)
         self.slider_brush.blockSignals(False)
-        self.lbl_brush.setText(f"Tamaño de Cursor: {radius * 2} px")
+        self.lbl_brush.setText(f"{radius * 2} px")
 
     def refine_mask(self):
         if self.canvas.orig_rgb is None:

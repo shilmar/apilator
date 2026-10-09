@@ -3,6 +3,46 @@
 Todas las novedades, mejoras y correcciones notables de **Apilator** se documentan en este archivo.
 El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/) y este proyecto se adhiere a [Semantic Versioning](https://semver.org/lang/es/).
 
+## [Unreleased]
+
+## [0.6.3] - 2026-10-09
+
+### Añadido
+* **Fusión HDR por Exposición Multiescala para Eclipses Lunares (Mertens-Kautz-Van Reeth):**
+  - Implementación de fusión por exposición multiescala para series de bracketing de eclipses lunares (`mode="lunar"`).
+  - Descomposición en pirámides laplacianas ponderadas simultáneamente por contraste local, saturación y exposición óptima.
+  - Resuelve el rango dinámico extremo (> 12–14 EV) entre el limbo intensamente iluminado por el Sol y la umbra rojiza ("Luna de Sangre"), revelando tanto el relieve fino de cráteres en las altas luces como la textura de los mares lunares en la sombra sin quemar ni empastar.
+  - Erradica por completo los artefactos de corte dentado quemado en cian/blanco y la compresión al negro absoluto que producía la división de flujo lineal.
+  - Conmutación automática en la GUI: título dinámico *"4. Fusión HDR (Mertens Multiescala)"* y compresión Asinh inicializada en *Lineal (1x)* al pasar a Eclipse Lunar.
+* **Detección Subpíxel Robusta del Limbo Lunar:**
+  - Transformada circular de Hough multiescala (`cv2.HoughCircles`) con barrido adaptativo de umbral de acumulador (`param2 = [35, 28, 22, 16, 12]`) y guiado por la región de pico de brillo lunar.
+  - Sustitución del percentil global fijo (p80) que seleccionaba erróneamente nubes y halos difusos circundantes (evitando radios sobredimensionados de 450–600 px y fijando con exactitud el radio real de la Luna de ~72 px).
+  - Algoritmo de reserva adaptativo local (Otsu) centrado en el foco de brillo para fases con bajo contraste.
+  - Detección unificada en lote sin arrastrar radios obsoletos o desajustados en la toma de referencia.
+* **Alineación de Eclipses con Réplica de Bordes:**
+  - `register_frame_to_center` y `align_eclipse_bracketing` emplean ahora `cv2.BORDER_REPLICATE` para los desplazamientos entre tomas, eliminando las bandas y costuras negras en los márgenes exteriores de la composición final.
+* **Relleno Continuo de Saltos entre Tomas (*Gap Filling*) en Trazas de Estrellas:**
+  - Algoritmo de puenteo morfológico de luminancia entre fotogramas contiguos que elimina la apariencia de trazos punteados o discontinuos provocados por la pausa del intervalómetro y el ciclo de obturación.
+  - Rango calibrado de precisión (1 a 4 px, por defecto 2 px) para evitar deformaciones laterales y preservar el grosor fino y natural de las estrellas.
+  - Preservación matemática total del fondo de cielo oscuro e inmunidad a ruidos.
+  - Fidelidad cromática RGB completa para mantener los colores naturales de las estrellas.
+  - Exclusión automática del suelo mediante máscara de horizonte y compatibilidad nativa con el Modo Cometa.
+* **Cancelación Instantánea de Procesamiento de Startrails:**
+  - El botón de ejecución alterna dinámicamente a `🛑 CANCELAR PROCESAMIENTO` en color rojo durante el apilado, deteniendo el proceso de forma inmediata (< 1s) sin bloquear la GUI.
+
+### Modificado
+* **Homogeneización Visual y Rediseño de Paneles en Todos los Módulos:**
+  - Paneles de control laterales unificados con ancho mínimo de 420 px, máximo de 520 px y predeterminado de 520 px en todos los módulos (`tab_stacker`, `tab_developer`, `tab_eclipse`, `tab_startrails`, `tab_settings`).
+  - Armonización estilística con el esquema visual de StarTrails y Ajustes: tonos oscuros azulados (`#161622`), bordes redondeados pulidos (`#2d2d3a`), cabeceras temáticas coloreadas para cada grupo de parámetros.
+  - Compactación vertical en Apilador: selectores desplegables alineados a la derecha de los títulos (algoritmo, rechazo, interpolación) y control horizontal en línea para el tamaño de pincel del cursor.
+  - Compactación vertical en Revelador: fila compacta horizontal para el control de "Atenuar cúpula de luz".
+* **Actualización de Versión:** Incremento general a **v0.6.3**.
+
+### Corregido
+* **Reseteo Integral del Revelador / Editor al Enviar Trazas:**
+  - `load_image_direct` realiza ahora una limpieza completa del estado previo (capas StarNet++, curvas, proxies de previsualización y ajustes) para garantizar que una nueva imagen enviada desde Startrails se cargue 100% limpia sin mezclar capas residuales.
+* **Eliminación de Pendiente en UI:** Se suprimió la mención a *Gap filling* de la lista de tareas pendientes en el panel de Ajustes tras su implementación completa.
+
 ## [0.6.2] - 2026-10-09
 
 ### Añadido

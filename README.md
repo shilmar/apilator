@@ -36,9 +36,14 @@
 
 ### 5. Módulo Especializado de Eclipses (Solar / Lunar)
 - **Ingesta Automática de Bracketing y Metadatos:** Carga de series de exposición completa (RAW, TIFF, FITS) con extracción de tiempos de obturación reales, ISO y apertura, ordenando automáticamente las tomas.
-- **Detección Subpíxel de Limbo Inmune a Protuberancias:** Algoritmo por flujo de gradiente radial perpendicular (`optimize_center_circular_flux`) basado en la mediana de 360 rayos angulares, insensible a protuberancias cromosféricas, fulguraciones o cuentas de Baily, ubicando el centro real con precisión < 0.1 píxeles.
-- **Alineación de Lotes con Radio Físico Anclado:** Detección en lote que fija el radio astronómico real de la toma de referencia para toda la serie y ajusta los desplazamientos afines con interpolación Lanczos4.
-- **Fusión Fotométrica HDR Lineal (32-bit):** Ponderación por tiempos reales de exposición con corte suave de saturación y estirado no lineal Asinh para revelar desde la cromosfera y protuberancias hasta la corona externa tenue.
+- **Detección Subpíxel de Limbo:**
+  - *Modo Solar:* Detección topológica de hueco interior de la Luna dentro del anillo coronal brillante.
+  - *Modo Lunar:* Transformada circular de Hough multiescala (`cv2.HoughCircles`) con guiado por pico de brillo y fallback adaptativo local (Otsu), inmune a nubes, halos difusos y cambios de fase.
+  - Refinamiento de centro y radio subpíxel milimétrico (< 0.1 px) con escáner radial y optimización de flujo circular mediano (`optimize_center_circular_flux`).
+- **Alineación de Lotes sin Costuras:** Detección en lote que ancla el radio astronómico real de la toma de referencia para toda la serie y ajusta los desplazamientos afines con interpolación Lanczos4 y replicación periférica (`BORDER_REPLICATE`) que erradica costuras y bordes negros.
+- **Fusión HDR Adaptativa (Solar y Lunar):**
+  - *Modo Solar:* Fusión fotométrica lineal de 32 bits ponderada por tiempo de exposición con estirado no lineal Asinh para revelar desde la cromosfera y protuberancias hasta la corona externa tenue.
+  - *Modo Lunar:* Fusión por Exposición Multiescala (Mertens-Kautz-Van Reeth) que equilibra el contraste extremo (> 12–14 EV) entre la zona iluminada directamente por el Sol y la umbra rojiza/terrestre, preservando los cráteres en las altas luces y la textura de la Luna de sangre en las sombras sin quemar ni empastar.
 - **Filtro NRGF (Normalized Radial Gradient Filter) Continuo:**
   - Interpolación continua subpíxel (`np.interp`) sin discretización de radios, eliminando por completo cualquier artefacto de bandas concéntricas.
   - Modulación dinámica desinhibida para estirar y contrastar filamentos coronales ("hilos") hasta 3.5x–4.0x radios solares.
@@ -48,6 +53,10 @@
 
 ### 6. Módulo Dedicado de Trazas de Estrellas (Startrails / Circumpolares)
 - **Streaming de Memoria $O(1)$:** Procesamiento secuencial sin cargar el lote completo en RAM, permitiendo componer cientos de tomas RAW o TIFF de ultra-alta resolución (24MP–60MP) sin consumo excesivo de memoria.
+- **Relleno Continuo de Saltos entre Tomas (*Gap Filling*):**
+  - Puenteo morfológico de luminancia calibrado (1 a 4 px, por defecto 2 px) que reconecta los trazos discontinuos o punteados originados por la pausa del intervalómetro o el ciclo de obturación.
+  - Preserva el grosor fino de las estrellas, la fidelidad cromática RGB y el fondo de cielo oscuro profundo, con exclusión del suelo y compatibilidad con el Modo Cometa.
+- **Cancelación Instantánea:** Botón dinámico `🛑 CANCELAR PROCESAMIENTO` que detiene el flujo de trabajo de forma inmediata (< 1s) sin bloquear la interfaz.
 - **Soporte de Tomas Dark:** Calibración térmica previa mediante Master Dark para eliminar píxeles calientes (*hot pixels*) antes de la integración.
 - **Algoritmo de Máximo Estándar (Lighten Clásico):** Fusión de luminancia máxima para trazas continuas.
 - **Algoritmo de Efecto Cometa / Estela Progresiva (Comet / Meteor Fade):**
@@ -67,7 +76,7 @@
 - **Exportación Dual 16-bit / 32-bit y Enlace Directo:** Guardado en TIFF 16-bit (compatible con Photoshop y Lightroom sin mapeos de tono), TIFF 32-bit float, o transferencia instantánea al Revelador / Editor.
 
 ### 7. Configuración, Rendimiento y Vitrina de Resultados
-- **Interfaz Moderna Unificada:** Paneles laterales oscuros con desplazamiento independiente mediante `QScrollArea`, consolas de registro (`txt_log`) fijas en la base en todos los módulos y diseño responsivo optimizado para pantallas compactas y monitores de alta resolución.
+- **Interfaz Moderna y Homogénea:** Paneles laterales unificados con ancho mínimo de 420 px, máximo de 520 px y predeterminado de 520 px en todos los módulos, diseño visual armónico en tonos azulados oscuros (`#161622`) y controles compactados verticalmente (selectores en línea en Apilador y Revelador).
 - **Vitrina de Resultados Integrada (Showcase):** Panel visual en la pestaña de Configuración con visor responsivo antialias que exhibe astrofotografía real de paisaje procesada de principio a fin con Apilator, acreditación de autoría (*Fotografía y Procesado: Shilmar*) e inspección a resolución nativa.
 - **Aceleración por GPU Dual:** Soporte automático para NVIDIA CUDA mediante CuPy y conmutación transparente a CPU multinúcleo en equipos sin GPU dedicada.
 - **Estrategias de Memoria Configurables:** Modos automático, memoria RAM intermedia de alta velocidad o volcado temporal a disco SSD para equipos con recursos limitados.
@@ -185,6 +194,7 @@ python run_app.py
   - **⭐ Máximo Estándar (Lighten Clásico)** para circumpolares de trazo continuo.
   - **☄️ Efecto Cometa / Estela Progresiva** ajustando longitud de estela (%), curva de decaimiento (lineal, cosenoidal suave o exponencial) y dirección temporal (hacia atrás, hacia adelante o simétrico/ambos sentidos).
 * Si tu serie contiene satélites artificiales o destellos de aviones, activa **🛸 Suprimir satélites y aviones automáticamente** y selecciona la sensibilidad deseada (Baja, Media o Alta).
+* Para corregir pequeñas pausas del intervalómetro o saltos de obturación y obtener trazas continuas sin aspecto de puntos discontinuos, activa **✨ Rellenar pausas entre tomas (Gap Filling)** y ajusta el radio del salto (1 a 4 px, por defecto 2 px).
 * Para eliminar por completo el ruido del terreno estático, activa **Activar Suelo Limpio (Eliminación de Ruido)** y pulsa **🖌️ Usar Máscara del Apilador** (o importa una máscara externa). Selecciona la integración del suelo (promedio temporal o toma de referencia) y el suavizado de borde (*feathering*).
 * Pulsa **⚡ Generar Trazas de Estrellas (Startrails)**.
 * Guarda el resultado en **TIFF 16-bit** (para edición directa en Photoshop/Lightroom) o **TIFF 32-bit**, o pulsa **➡️ Enviar al Revelador / Editor** para seguir procesando curvas, color y contraste.
@@ -200,7 +210,7 @@ python run_app.py
 [x] Integración de StarNet++ v2 y GraXpert AI.
 [x] Rutina específica de apilado y alineación para eclipses solares y lunares (Módulo Eclipses con NRGF continuo y detección subpíxel).
 [x] Módulo dedicado de Trazas de Estrellas (Startrails) con streaming O(1), efecto cometa, suelo limpio y supresión automática de satélites/aviones.
-[ ] Relleno continuo de saltos entre tomas (Gap Filling) en Startrails.
+[x] Relleno continuo de saltos entre tomas (Gap Filling) en Startrails.
 [ ] Generación y exportación de secuencia acumulativa de fotogramas para vídeo Time-Lapse.
 [ ] Módulo de composición panorámica para mosaicos nocturnos.
 [ ] Exportación de perfiles de color ICC embebidos (sRGB / AdobeRGB / ProPhoto).

@@ -32,3 +32,6 @@ exportaciones/*
 # Recursos estáticos de la interfaz
 !gui/assets/
 !gui/assets/*
+
+# Muestras y pruebas locales
+samples/
