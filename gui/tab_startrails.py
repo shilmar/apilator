@@ -1,0 +1,874 @@
+# gui/tab_startrails.py
+"""
+gui/tab_startrails.py - Pestaña dedicada para la generación de Trazas de Estrellas (Startrails / Circumpolares).
+
+Implementa:
+1. Ingesta de serie temporal de tomas (Lights) y tomas oscuras (Darks).
+2. Algoritmo de Máximo Estándar (Lighten Clásico).
+3. Algoritmo de Efecto Cometa / Estela Progresiva (Comet / Meteor Fade).
+4. Fusión de Suelo Limpio (Separación Cielo/Suelo mediante máscara y reducción drástica de ruido en sombras).
+5. Visualización interactiva en Canvas con zoom 1:1.
+6. Exportación en TIFF 16-bit / 32-bit y transferencia directa al Revelador / Editor.
+"""
+import os
+from typing import Optional, List, Dict, Any, Callable
+import tifffile
+import numpy as np
+import cv2
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
+    QPushButton, QFileDialog, QMessageBox, QSlider, QRadioButton,
+    QButtonGroup, QComboBox, QCheckBox, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QProgressBar, QTextEdit, QScrollArea,
+    QSplitter, QFrame, QSizePolicy
+)
+
+from core.stacking import load_image_as_float32
+from core.startrails import generate_startrail
+from gui.canvas import MaskCanvas
+
+
+class StartrailWorker(QThread):
+    """Hilo de trabajo en segundo plano para el procesamiento de trazas sin bloquear la interfaz."""
+    progress = Signal(int, str)
+    finished = Signal(object, str)
+    error = Signal(str)
+
+    def __init__(self, params: Dict[str, Any]):
+        super().__init__()
+        self.params = params
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            result = generate_startrail(
+                files=self.params["files"],
+                mode=self.params.get("mode", "lighten"),
+                comet_params=self.params.get("comet_params"),
+                dark_files=self.params.get("dark_files"),
+                use_clean_ground=self.params.get("use_clean_ground", False),
+                mask=self.params.get("mask"),
+                ground_mode=self.params.get("ground_mode", "average"),
+                ref_idx=self.params.get("ref_idx", 0),
+                feather_radius=self.params.get("feather_radius", 5),
+                suppress_streaks=self.params.get("suppress_streaks", False),
+                streak_sensitivity=self.params.get("streak_sensitivity", 0.5),
+                progress_callback=self.progress.emit,
+                abort_flag=lambda: self._is_cancelled
+            )
+            self.finished.emit(result, "startrail_generation")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class StartrailsTab(QWidget):
+    """Pestaña maestra para la creación y posprocesado de circumpolares y trazas de estrellas."""
+    export_to_developer = Signal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.files_list: List[str] = []
+        self.dark_files: List[str] = []
+        self.ref_idx: int = 0
+        self.current_mask: Optional[np.ndarray] = None
+        self.current_preview_img: Optional[np.ndarray] = None
+        self.final_startrail_img: Optional[np.ndarray] = None
+        self.worker: Optional[StartrailWorker] = None
+        self._mask_provider: Optional[Callable[[], Optional[np.ndarray]]] = None
+
+        self._setup_ui()
+        self._apply_styles()
+
+    def set_stacker_mask_provider(self, provider: Callable[[], Optional[np.ndarray]]) -> None:
+        """Establece una función proveedora para importar directamente la máscara calculada en el Apilador."""
+        self._mask_provider = provider
+
+    def _setup_ui(self) -> None:
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        # -------------------------------------------------------------
+        # PANEL IZQUIERDO: Controles en ScrollArea
+        # -------------------------------------------------------------
+        left_container = QWidget()
+        left_container.setMinimumWidth(420)
+        left_container.setMaximumWidth(520)
+        left_container_layout = QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(4, 4, 4, 4)
+        left_container_layout.setSpacing(6)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        panel_content = QWidget()
+        left_layout = QVBoxLayout(panel_content)
+        left_layout.setContentsMargins(4, 4, 10, 4)
+        left_layout.setSpacing(12)
+
+        # 1. GRUPO: SERIE TEMPORAL DE TOMAS
+        grp_files = QGroupBox("1. Serie Temporal de Tomas (Lights)")
+        files_layout = QVBoxLayout(grp_files)
+        files_layout.setContentsMargins(10, 14, 10, 10)
+        files_layout.setSpacing(8)
+
+        btn_row_files = QHBoxLayout()
+        self.btn_load_series = QPushButton("📁 Cargar Serie...")
+        self.btn_load_series.setStyleSheet("font-weight: bold; color: #80d8ff;")
+        self.btn_load_series.clicked.connect(self._on_load_series_clicked)
+
+        self.btn_clear_series = QPushButton("🗑️ Limpiar")
+        self.btn_clear_series.clicked.connect(self._on_clear_series_clicked)
+
+        self.btn_set_ref = QPushButton("📌 Marcar REF")
+        self.btn_set_ref.setToolTip("Establece la toma seleccionada como referencia para el suelo y previsualización")
+        self.btn_set_ref.clicked.connect(self._on_set_ref_clicked)
+
+        btn_row_files.addWidget(self.btn_load_series)
+        btn_row_files.addWidget(self.btn_clear_series)
+        btn_row_files.addWidget(self.btn_set_ref)
+        files_layout.addLayout(btn_row_files)
+
+        self.table_files = QTableWidget(0, 3)
+        self.table_files.setHorizontalHeaderLabels(["REF", "Archivo", "Ubicación"])
+        self.table_files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table_files.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table_files.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_files.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_files.setMinimumHeight(150)
+        self.table_files.itemSelectionChanged.connect(self._on_table_selection_changed)
+        files_layout.addWidget(self.table_files)
+
+        self.lbl_files_summary = QLabel("0 tomas cargadas")
+        self.lbl_files_summary.setStyleSheet("color: #ffd54f; font-weight: bold; font-size: 11px;")
+        files_layout.addWidget(self.lbl_files_summary)
+
+        # Fila compacta de Darks
+        row_dark = QHBoxLayout()
+        row_dark.addWidget(QLabel("🌑 Darks (opcional):"))
+        self.lbl_darks_count = QLabel("0 darks")
+        self.lbl_darks_count.setStyleSheet("color: #90a4ae; font-size: 11px;")
+        row_dark.addWidget(self.lbl_darks_count)
+        row_dark.addStretch()
+
+        self.btn_load_darks = QPushButton("Añadir Darks...")
+        self.btn_load_darks.setStyleSheet("font-size: 11px; padding: 3px 8px;")
+        self.btn_load_darks.clicked.connect(self._on_load_darks_clicked)
+        row_dark.addWidget(self.btn_load_darks)
+
+        self.btn_clear_darks = QPushButton("Quitar")
+        self.btn_clear_darks.setStyleSheet("font-size: 11px; padding: 3px 8px;")
+        self.btn_clear_darks.clicked.connect(self._on_clear_darks_clicked)
+        row_dark.addWidget(self.btn_clear_darks)
+        files_layout.addLayout(row_dark)
+
+        left_layout.addWidget(grp_files)
+
+        # 2. GRUPO: ALGORITMO DE TRAZAS (CIELO)
+        grp_modes = QGroupBox("2. Algoritmo de Trazas (Cielo)")
+        modes_layout = QVBoxLayout(grp_modes)
+        modes_layout.setContentsMargins(10, 14, 10, 10)
+        modes_layout.setSpacing(8)
+
+        self.rb_lighten = QRadioButton("⭐ Máximo Estándar (Lighten Clásico)")
+        self.rb_lighten.setChecked(True)
+        self.rb_lighten.toggled.connect(self._on_mode_toggled)
+        modes_layout.addWidget(self.rb_lighten)
+
+        self.rb_comet = QRadioButton("☄️ Efecto Cometa / Estela Progresiva (Fade)")
+        self.rb_comet.toggled.connect(self._on_mode_toggled)
+        modes_layout.addWidget(self.rb_comet)
+
+        # Contenedor de parámetros del Efecto Cometa
+        self.container_comet = QWidget()
+        comet_layout = QVBoxLayout(self.container_comet)
+        comet_layout.setContentsMargins(12, 4, 4, 4)
+        comet_layout.setSpacing(8)
+
+        # Longitud de estela
+        row_tail = QHBoxLayout()
+        row_tail.addWidget(QLabel("Longitud de Estela:"))
+        self.lbl_tail_val = QLabel("35%")
+        self.lbl_tail_val.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_tail.addWidget(self.lbl_tail_val)
+        row_tail.addStretch()
+        comet_layout.addLayout(row_tail)
+
+        self.slider_tail = QSlider(Qt.Horizontal)
+        self.slider_tail.setRange(5, 100)
+        self.slider_tail.setValue(35)
+        self.slider_tail.valueChanged.connect(lambda v: self.lbl_tail_val.setText(f"{v}%"))
+        comet_layout.addWidget(self.slider_tail)
+
+        # Perfil de decaimiento
+        row_decay = QHBoxLayout()
+        row_decay.addWidget(QLabel("Curva de Decaimiento:"))
+        self.combo_decay = QComboBox()
+        self.combo_decay.addItem("Lineal uniforme", "linear")
+        self.combo_decay.addItem("Suave (Cosenoidal)", "smooth")
+        self.combo_decay.addItem("Exponencial rápida", "exponential")
+        row_decay.addWidget(self.combo_decay)
+        comet_layout.addLayout(row_decay)
+
+        # Dirección
+        row_dir = QHBoxLayout()
+        row_dir.addWidget(QLabel("Dirección:"))
+        self.combo_dir = QComboBox()
+        self.combo_dir.addItem("Hacia atrás (Cola en tomas pasadas)", "backward")
+        self.combo_dir.addItem("Hacia adelante (Cola en tomas futuras)", "forward")
+        self.combo_dir.addItem("Doble / Ambos sentidos (Simétrico: brillo central y colas afiladas)", "bidirectional")
+        row_dir.addWidget(self.combo_dir)
+        comet_layout.addLayout(row_dir)
+
+        # Cota mínima de luminancia de fondo
+        row_floor = QHBoxLayout()
+        row_floor.addWidget(QLabel("Luminancia mínima de fondo:"))
+        self.lbl_floor_val = QLabel("0%")
+        self.lbl_floor_val.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        row_floor.addWidget(self.lbl_floor_val)
+        row_floor.addStretch()
+        comet_layout.addLayout(row_floor)
+
+        self.slider_floor = QSlider(Qt.Horizontal)
+        self.slider_floor.setRange(0, 25)
+        self.slider_floor.setValue(0)
+        self.slider_floor.valueChanged.connect(lambda v: self.lbl_floor_val.setText(f"{v}%"))
+        comet_layout.addWidget(self.slider_floor)
+
+        modes_layout.addWidget(self.container_comet)
+        self.container_comet.setVisible(False)  # Inicialmente oculto en modo Lighten
+
+        # Supresión de satélites y aviones
+        self.chk_suppress_streaks = QCheckBox("🛸 Suprimir satélites y aviones automáticamente")
+        self.chk_suppress_streaks.setStyleSheet("font-weight: bold; color: #80cbc4;")
+        self.chk_suppress_streaks.setToolTip(
+            "Detecta trazas lineales transitorias (satélites artificiales y aviones con luces estroboscópicas)\n"
+            "mediante comparación temporal diferencial y las elimina sin afectar a las estrellas."
+        )
+        self.chk_suppress_streaks.toggled.connect(self._on_suppress_streaks_toggled)
+        modes_layout.addWidget(self.chk_suppress_streaks)
+
+        self.container_streaks = QWidget()
+        streaks_layout = QVBoxLayout(self.container_streaks)
+        streaks_layout.setContentsMargins(16, 2, 4, 4)
+        streaks_layout.setSpacing(6)
+
+        row_sens = QHBoxLayout()
+        row_sens.addWidget(QLabel("Sensibilidad:"))
+        self.combo_streak_sens = QComboBox()
+        self.combo_streak_sens.addItem("Baja (Solo trazas muy brillantes o gruesas)", 0.25)
+        self.combo_streak_sens.addItem("Media (Recomendada / Equilibrada)", 0.50)
+        self.combo_streak_sens.addItem("Alta (Satélites débiles y luces tenues)", 0.75)
+        self.combo_streak_sens.setCurrentIndex(1)
+        row_sens.addWidget(self.combo_streak_sens)
+        streaks_layout.addLayout(row_sens)
+
+        self.container_streaks.setVisible(False)
+        modes_layout.addWidget(self.container_streaks)
+
+        left_layout.addWidget(grp_modes)
+
+        # 3. GRUPO: FUSIÓN DE SUELO LIMPIO (ANTI-RUIDO)
+        grp_ground = QGroupBox("3. Fusión de Suelo Limpio (Separación Cielo / Suelo)")
+        ground_layout = QVBoxLayout(grp_ground)
+        ground_layout.setContentsMargins(10, 14, 10, 10)
+        ground_layout.setSpacing(8)
+
+        self.chk_clean_ground = QCheckBox("Activar Suelo Limpio (Eliminación de Ruido)")
+        self.chk_clean_ground.setStyleSheet("font-weight: bold; color: #a5d6a7;")
+        self.chk_clean_ground.toggled.connect(self._on_clean_ground_toggled)
+        ground_layout.addWidget(self.chk_clean_ground)
+
+        self.container_ground = QWidget()
+        gnd_sub_layout = QVBoxLayout(self.container_ground)
+        gnd_sub_layout.setContentsMargins(12, 4, 4, 4)
+        gnd_sub_layout.setSpacing(8)
+
+        row_gnd_mode = QHBoxLayout()
+        row_gnd_mode.addWidget(QLabel("Integración del Suelo:"))
+        self.combo_gnd_mode = QComboBox()
+        self.combo_gnd_mode.addItem("Promedio temporal (Ruido mínimo)", "average")
+        self.combo_gnd_mode.addItem("Toma de referencia única", "ref")
+        row_gnd_mode.addWidget(self.combo_gnd_mode)
+        gnd_sub_layout.addLayout(row_gnd_mode)
+
+        # Máscara de horizonte
+        row_mask_btns = QHBoxLayout()
+        self.btn_load_mask = QPushButton("📁 Cargar Máscara...")
+        self.btn_load_mask.setToolTip("Carga un archivo PNG, TIFF o FITS con la máscara de cielo/suelo")
+        self.btn_load_mask.clicked.connect(self._on_load_mask_clicked)
+
+        self.btn_import_stacker_mask = QPushButton("🖌️ Usar Máscara del Apilador")
+        self.btn_import_stacker_mask.setStyleSheet("color: #ffcc80;")
+        self.btn_import_stacker_mask.setToolTip("Importa con un solo clic la máscara de horizonte calculada en la Pestaña 1")
+        self.btn_import_stacker_mask.clicked.connect(self._on_import_stacker_mask_clicked)
+
+        row_mask_btns.addWidget(self.btn_load_mask)
+        row_mask_btns.addWidget(self.btn_import_stacker_mask)
+        gnd_sub_layout.addLayout(row_mask_btns)
+
+        self.lbl_mask_status = QLabel("⚠️ Sin máscara de horizonte asignada")
+        self.lbl_mask_status.setStyleSheet("color: #ffb74d; font-size: 11px;")
+        gnd_sub_layout.addWidget(self.lbl_mask_status)
+
+        # Suavizado de bordes (Feathering)
+        row_feather = QHBoxLayout()
+        row_feather.addWidget(QLabel("Suavizado de Borde (Feather):"))
+        self.lbl_feather_val = QLabel("5 px")
+        self.lbl_feather_val.setStyleSheet("color: #80d8ff; font-weight: bold;")
+        row_feather.addWidget(self.lbl_feather_val)
+        row_feather.addStretch()
+        gnd_sub_layout.addLayout(row_feather)
+
+        self.slider_feather = QSlider(Qt.Horizontal)
+        self.slider_feather.setRange(0, 30)
+        self.slider_feather.setValue(5)
+        self.slider_feather.valueChanged.connect(lambda v: self.lbl_feather_val.setText(f"{v} px"))
+        gnd_sub_layout.addWidget(self.slider_feather)
+
+        self.chk_show_mask = QCheckBox("Superponer máscara en el visor")
+        self.chk_show_mask.setChecked(False)
+        self.chk_show_mask.toggled.connect(self._on_show_mask_toggled)
+        gnd_sub_layout.addWidget(self.chk_show_mask)
+
+        ground_layout.addWidget(self.container_ground)
+        self.container_ground.setEnabled(False)
+
+        left_layout.addWidget(grp_ground)
+
+        # 4. GRUPO: EXPORTACIÓN
+        grp_export = QGroupBox("4. Exportación y Flujo de Trabajo")
+        export_layout = QVBoxLayout(grp_export)
+        export_layout.setContentsMargins(10, 14, 10, 10)
+        export_layout.setSpacing(8)
+
+        btn_tiff_row = QHBoxLayout()
+        self.btn_save_tiff_16 = QPushButton("💾 Guardar TIFF 16-bit...")
+        self.btn_save_tiff_16.setStyleSheet("font-weight: bold; color: #80cbc4;")
+        self.btn_save_tiff_16.clicked.connect(lambda: self._on_save_tiff_clicked(bit_depth=16))
+
+        self.btn_save_tiff_32 = QPushButton("💾 Guardar TIFF 32-bit...")
+        self.btn_save_tiff_32.setStyleSheet("font-weight: bold; color: #90caf9;")
+        self.btn_save_tiff_32.clicked.connect(lambda: self._on_save_tiff_clicked(bit_depth=32))
+
+        btn_tiff_row.addWidget(self.btn_save_tiff_16)
+        btn_tiff_row.addWidget(self.btn_save_tiff_32)
+        export_layout.addLayout(btn_tiff_row)
+
+        self.btn_send_to_dev = QPushButton("➡️ Enviar al Revelador / Editor")
+        self.btn_send_to_dev.setStyleSheet("font-weight: bold; padding: 6px; color: #ffd54f;")
+        self.btn_send_to_dev.clicked.connect(self._on_send_to_developer_clicked)
+        export_layout.addWidget(self.btn_send_to_dev)
+
+        left_layout.addWidget(grp_export)
+
+        # TARJETA INFORMATIVA DE HOJA DE RUTA (ROADMAP PENDIENTE)
+        card_roadmap = QWidget()
+        card_roadmap.setObjectName("card_roadmap")
+        roadmap_layout = QVBoxLayout(card_roadmap)
+        roadmap_layout.setContentsMargins(10, 8, 10, 8)
+        roadmap_layout.setSpacing(4)
+
+        lbl_rm_title = QLabel("💡 Próximas funciones en desarrollo:")
+        lbl_rm_title.setStyleSheet("color: #b388ff; font-size: 11px; font-weight: bold;")
+        roadmap_layout.addWidget(lbl_rm_title)
+
+        lbl_rm_desc = QLabel(
+            "• Relleno continuo de saltos entre tomas (Gap Filling)\n"
+            "• Generación de secuencia acumulativa para vídeo Time-Lapse"
+        )
+        lbl_rm_desc.setStyleSheet("color: #8c8c9e; font-size: 10px; line-height: 140%;")
+        roadmap_layout.addWidget(lbl_rm_desc)
+
+        left_layout.addWidget(card_roadmap)
+        left_layout.addStretch()
+
+        scroll_area.setWidget(panel_content)
+        left_container_layout.addWidget(scroll_area, 1)
+
+        # Consola de estado, barra de progreso y botón de ejecución FIJOS abajo
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #333333;
+                border-radius: 3px;
+                text-align: center;
+                font-size: 10px;
+                background-color: #1a1a1a;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #2e7d32;
+            }
+        """)
+        self.progress_bar.setVisible(False)
+        left_container_layout.addWidget(self.progress_bar)
+
+        lbl_log = QLabel("Registro de Actividad:")
+        lbl_log.setStyleSheet("color: #a0a0a0; font-size: 11px; font-weight: bold;")
+        left_container_layout.addWidget(lbl_log)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFixedHeight(100)
+        self.txt_log.setStyleSheet(
+            "background-color: #141414; color: #a5d6a7; "
+            "font-family: Consolas, monospace; font-size: 11px; "
+            "border: 1px solid #333333; border-radius: 4px; padding: 4px;"
+        )
+        left_container_layout.addWidget(self.txt_log)
+
+        self.btn_run = QPushButton("⚡ Generar Trazas de Estrellas (Startrails)")
+        self.btn_run.setFixedHeight(42)
+        self.btn_run.setCursor(Qt.PointingHandCursor)
+        self.btn_run.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 13px;
+                background-color: #2e7d32;
+                color: white;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #388e3c;
+            }
+            QPushButton:pressed {
+                background-color: #1b5e20;
+            }
+        """)
+        self.btn_run.clicked.connect(self._on_run_clicked)
+        left_container_layout.addWidget(self.btn_run)
+
+        # -------------------------------------------------------------
+        # PANEL DERECHO: Canvas Interactivo con Zoom 1:1
+        # -------------------------------------------------------------
+        self.canvas = MaskCanvas(self, enable_masking=False)
+
+        splitter.addWidget(left_container)
+        splitter.addWidget(self.canvas)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 10)
+        splitter.setSizes([450, 1400])
+
+        main_layout.addWidget(splitter)
+
+    def _apply_styles(self) -> None:
+        """Aplica estilos consistentes con el diseño de Apilator."""
+        self.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #2d2d3a;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 14px;
+                background-color: #1a1a22;
+                color: #e0e0e0;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 4px;
+                color: #90caf9;
+            }
+            QTableWidget {
+                background-color: #141414;
+                border: 1px solid #333333;
+                border-radius: 4px;
+                color: #ffffff;
+                gridline-color: #262626;
+                font-size: 11px;
+            }
+            QTableWidget::item:selected {
+                background-color: #1b4d3e;
+                color: #80d8ff;
+            }
+            QHeaderView::section {
+                background-color: #1f1f28;
+                color: #a0a0a0;
+                padding: 4px;
+                border: 1px solid #2d2d3a;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QPushButton {
+                background-color: #252530;
+                border: 1px solid #3a3a4c;
+                border-radius: 4px;
+                padding: 5px 10px;
+                color: #e0e0e0;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #2f2f3d;
+                border-color: #55556a;
+            }
+            QPushButton:pressed {
+                background-color: #1c1c24;
+            }
+            QComboBox {
+                background-color: #121216;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #f0f0f0;
+            }
+            QWidget#card_roadmap {
+                background-color: #14141e;
+                border: 1px dashed #3d3d52;
+                border-radius: 6px;
+            }
+        """)
+
+    def log(self, message: str) -> None:
+        """Registra un mensaje en la consola inferior con autoscroll."""
+        self.txt_log.append(message)
+        self.txt_log.moveCursor(QTextCursor.End)
+
+    # -------------------------------------------------------------
+    # GESTIÓN DE EVENTOS Y ACCIONES
+    # -------------------------------------------------------------
+    def _on_mode_toggled(self) -> None:
+        """Muestra u oculta los controles específicos del efecto cometa."""
+        is_comet = self.rb_comet.isChecked()
+        self.container_comet.setVisible(is_comet)
+
+    def _on_suppress_streaks_toggled(self, checked: bool) -> None:
+        """Muestra u oculta los controles de sensibilidad para la supresión de satélites y aviones."""
+        self.container_streaks.setVisible(checked)
+
+    def _on_clean_ground_toggled(self, checked: bool) -> None:
+        """Habilita o deshabilita los controles de integración de suelo limpio."""
+        self.container_ground.setEnabled(checked)
+        if checked:
+            self._update_mask_status_label()
+
+    def _on_load_series_clicked(self) -> None:
+        """Abre el diálogo de archivos para cargar la serie temporal de fotografías."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar Serie de Tomas para Startrails",
+            os.getcwd(),
+            "Imágenes (*.nef *.cr2 *.cr3 *.arw *.dng *.raw *.tif *.tiff *.fits *.jpg *.png);;Todos (*.*)"
+        )
+        if not files:
+            return
+
+        self.files_list = sorted(files)
+        self.ref_idx = 0
+        self._refresh_table()
+        self.lbl_files_summary.setText(f"{len(self.files_list)} tomas cargadas")
+        self.log(f"Cargadas {len(self.files_list)} tomas para la serie de trazas.")
+
+        # Cargar la primera toma en el visor para previsualización inmediata
+        if self.files_list:
+            try:
+                img = load_image_as_float32(self.files_list[0])
+                self.current_preview_img = img
+                self.canvas.load_image(img)
+            except Exception as e:
+                self.log(f"Error al previsualizar primera toma: {e}")
+
+    def _on_clear_series_clicked(self) -> None:
+        """Limpia la lista de archivos."""
+        self.files_list.clear()
+        self.table_files.setRowCount(0)
+        self.lbl_files_summary.setText("0 tomas cargadas")
+        self.current_preview_img = None
+        self.final_startrail_img = None
+        self.canvas.orig_rgb = None
+        self.canvas.base_pixmap = None
+        self.canvas.update()
+        self.log("Lista de tomas vaciada.")
+
+    def _refresh_table(self) -> None:
+        """Actualiza la tabla con los archivos cargados."""
+        self.table_files.setRowCount(len(self.files_list))
+        for row, path in enumerate(self.files_list):
+            is_ref = (row == self.ref_idx)
+            ref_item = QTableWidgetItem("📌 REF" if is_ref else "")
+            ref_item.setTextAlignment(Qt.AlignCenter)
+            if is_ref:
+                ref_item.setForeground(Qt.yellow)
+
+            name_item = QTableWidgetItem(os.path.basename(path))
+            dir_item = QTableWidgetItem(os.path.dirname(path))
+
+            self.table_files.setItem(row, 0, ref_item)
+            self.table_files.setItem(row, 1, name_item)
+            self.table_files.setItem(row, 2, dir_item)
+
+    def _on_set_ref_clicked(self) -> None:
+        """Establece la fila actualmente seleccionada como referencia."""
+        selected_rows = self.table_files.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        self.ref_idx = selected_rows[0].row()
+        self._refresh_table()
+        ref_path = self.files_list[self.ref_idx]
+        self.log(f"Toma de referencia establecida: {os.path.basename(ref_path)}")
+        try:
+            img = load_image_as_float32(ref_path)
+            self.current_preview_img = img
+            self.canvas.load_image(img)
+        except Exception as e:
+            self.log(f"Error al cargar referencia: {e}")
+
+    def _on_table_selection_changed(self) -> None:
+        """Carga en el canvas la imagen que el usuario cliquee en la lista."""
+        selected_rows = self.table_files.selectionModel().selectedRows()
+        if not selected_rows or self.final_startrail_img is not None:
+            return
+        idx = selected_rows[0].row()
+        if 0 <= idx < len(self.files_list):
+            try:
+                img = load_image_as_float32(self.files_list[idx])
+                self.current_preview_img = img
+                self.canvas.load_image(img)
+                self._update_canvas_mask_overlay()
+            except Exception:
+                pass
+
+    def _on_load_darks_clicked(self) -> None:
+        """Carga tomas oscuras para la sustracción de píxeles calientes."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar Tomas Dark",
+            os.getcwd(),
+            "Imágenes (*.nef *.cr2 *.cr3 *.arw *.dng *.raw *.tif *.tiff *.fits);;Todos (*.*)"
+        )
+        if files:
+            self.dark_files = files
+            self.lbl_darks_count.setText(f"{len(files)} darks")
+            self.lbl_darks_count.setStyleSheet("color: #a5d6a7; font-weight: bold; font-size: 11px;")
+            self.log(f"Añadidos {len(files)} tomas dark para sustracción térmica.")
+
+    def _on_clear_darks_clicked(self) -> None:
+        """Descarta las tomas oscuras."""
+        self.dark_files.clear()
+        self.lbl_darks_count.setText("0 darks")
+        self.lbl_darks_count.setStyleSheet("color: #90a4ae; font-size: 11px;")
+        self.log("Darks descartados.")
+
+    def _on_load_mask_clicked(self) -> None:
+        """Permite al usuario seleccionar un archivo de imagen con la máscara de horizonte."""
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar Máscara de Horizonte",
+            os.getcwd(),
+            "Imágenes (*.png *.tif *.tiff *.fits *.jpg);;Todos (*.*)"
+        )
+        if f:
+            try:
+                mask_data = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+                if mask_data is None:
+                    # Intento con tifffile si es float o 16-bit
+                    mask_data = tifffile.imread(f)
+                    if mask_data.ndim == 3:
+                        mask_data = mask_data[..., 0]
+                    if mask_data.max() <= 1.05:
+                        mask_data = (mask_data * 255.0).astype(np.uint8)
+
+                self.current_mask = mask_data
+                self.chk_show_mask.setChecked(True)
+                self._update_mask_status_label()
+                self._update_canvas_mask_overlay()
+                self.log(f"Máscara de horizonte cargada desde: {os.path.basename(f)}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error de Máscara", f"No se pudo leer la máscara:\n{e}")
+
+    def _on_import_stacker_mask_clicked(self) -> None:
+        """Importa la máscara generada en la Pestaña 1 (Apilador)."""
+        if self._mask_provider is not None:
+            m = self._mask_provider()
+            if m is not None:
+                self.current_mask = m.copy()
+                self.chk_show_mask.setChecked(True)
+                self._update_mask_status_label()
+                self._update_canvas_mask_overlay()
+                self.log("Máscara del Apilador importada correctamente.")
+                QMessageBox.information(self, "Máscara Importada", "Se ha importado con éxito la máscara de horizonte desde el módulo Apilador.")
+                return
+
+        QMessageBox.warning(
+            self, "Sin Máscara Disponible",
+            "No hay ninguna máscara calculada en el módulo de Apilado.\n"
+            "Calcula primero una segmentación en el Apilador o carga una máscara externa con 'Cargar Máscara...'."
+        )
+
+    def _update_mask_status_label(self) -> None:
+        """Actualiza el texto descriptivo del estado de la máscara."""
+        if self.current_mask is not None:
+            h, w = self.current_mask.shape[:2]
+            self.lbl_mask_status.setText(f"✓ Máscara activa ({w}x{h} px)")
+            self.lbl_mask_status.setStyleSheet("color: #81c784; font-weight: bold; font-size: 11px;")
+        else:
+            self.lbl_mask_status.setText("⚠️ Sin máscara de horizonte asignada")
+            self.lbl_mask_status.setStyleSheet("color: #ffb74d; font-size: 11px;")
+
+    def _on_show_mask_toggled(self, checked: bool) -> None:
+        """Muestra u oculta la máscara superpuesta en el visor."""
+        self._update_canvas_mask_overlay()
+
+    def _update_canvas_mask_overlay(self) -> None:
+        """Transfiere la máscara al visor para representación visual en color."""
+        if self.chk_show_mask.isChecked() and self.current_mask is not None:
+            self.canvas.set_refined_mask(self.current_mask)
+            self.canvas.set_mask_visible(True)
+        else:
+            self.canvas.set_mask_visible(False)
+
+    def _on_run_clicked(self) -> None:
+        """Dispara la generación del Startrail en segundo plano."""
+        if not self.files_list:
+            QMessageBox.warning(self, "Atención", "Debes cargar al menos dos tomas para generar trazas.")
+            return
+
+        mode = "comet" if self.rb_comet.isChecked() else "lighten"
+        comet_params = None
+        if mode == "comet":
+            comet_params = {
+                "tail_pct": self.slider_tail.value(),
+                "decay": self.combo_decay.currentData(),
+                "direction": self.combo_dir.currentData(),
+                "min_floor": self.slider_floor.value() / 100.0
+            }
+
+        use_clean_ground = self.chk_clean_ground.isChecked()
+        if use_clean_ground and self.current_mask is None:
+            ans = QMessageBox.question(
+                self, "Máscara No Asignada",
+                "Has activado 'Suelo Limpio' pero no has asignado ninguna máscara.\n\n"
+                "¿Deseas continuar calculando el Startrail estándar sobre toda la imagen?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if ans != QMessageBox.Yes:
+                return
+            use_clean_ground = False
+
+        params = {
+            "files": self.files_list,
+            "mode": mode,
+            "comet_params": comet_params,
+            "dark_files": self.dark_files if self.dark_files else None,
+            "use_clean_ground": use_clean_ground,
+            "mask": self.current_mask if use_clean_ground else None,
+            "ground_mode": self.combo_gnd_mode.currentData(),
+            "ref_idx": self.ref_idx,
+            "feather_radius": self.slider_feather.value(),
+            "suppress_streaks": self.chk_suppress_streaks.isChecked(),
+            "streak_sensitivity": float(self.combo_streak_sens.currentData() or 0.5)
+        }
+
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("⏳ Procesando Trazas...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.log(f"Iniciando cálculo de trazas en modo: {mode.upper()}...")
+
+        self.worker = StartrailWorker(params)
+        self.worker.progress.connect(self._on_worker_progress)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.error.connect(self._on_worker_error)
+        self.worker.start()
+
+    def _on_worker_progress(self, pct: int, msg: str) -> None:
+        self.progress_bar.setValue(pct)
+        if pct % 10 == 0 or pct >= 90:
+            self.log(msg)
+
+    def _on_worker_finished(self, result: np.ndarray, task_type: str) -> None:
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("⚡ Generar Trazas de Estrellas (Startrails)")
+        self.progress_bar.setValue(100)
+        self.progress_bar.setVisible(False)
+
+        self.final_startrail_img = result
+        self.canvas.load_image(result)
+        self._update_canvas_mask_overlay()
+        self.log("Trazas de estrellas compuestas y renderizadas en el visor.")
+
+    def _on_worker_error(self, err_msg: str) -> None:
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("⚡ Generar Trazas de Estrellas (Startrails)")
+        self.progress_bar.setVisible(False)
+        self.log(f"ERROR: {err_msg}")
+        QMessageBox.critical(self, "Error de Procesado", f"Ocurrió un error al generar las trazas:\n{err_msg}")
+
+    # -------------------------------------------------------------
+    # EXPORTACIÓN
+    # -------------------------------------------------------------
+    def _get_best_image(self) -> Optional[np.ndarray]:
+        if self.final_startrail_img is not None:
+            return self.final_startrail_img
+        return self.current_preview_img
+
+    def _on_save_tiff_clicked(self, bit_depth: int = 16) -> None:
+        img = self._get_best_image()
+        if img is None:
+            QMessageBox.warning(self, "Atención", "No hay imagen disponible para guardar.")
+            return
+
+        default_name = f"startrail_{bit_depth}bit.tif"
+        if bit_depth == 16:
+            filters = "TIFF 16-bit (*.tif *.tiff);;TIFF 32-bit (*.tif *.tiff);;Todos (*.*)"
+            title = "Guardar Trazas de Estrellas (TIFF 16-bit)"
+        else:
+            filters = "TIFF 32-bit (*.tif *.tiff);;TIFF 16-bit (*.tif *.tiff);;Todos (*.*)"
+            title = "Guardar Trazas de Estrellas (TIFF 32-bit Float)"
+
+        path, selected_filter = QFileDialog.getSaveFileName(self, title, default_name, filters)
+        if not path:
+            return
+
+        is_32 = ("32-bit" in selected_filter) if selected_filter else (bit_depth == 32)
+        photometric = 'minisblack' if img.ndim == 2 else 'rgb'
+
+        try:
+            if is_32:
+                out_img = np.ascontiguousarray(np.clip(img, 0.0, 1.0), dtype=np.float32)
+                desc = "TIFF 32-bit float (HDR)"
+            else:
+                out_img = np.ascontiguousarray(np.clip(img * 65535.0 + 0.5, 0.0, 65535.0), dtype=np.uint16)
+                desc = "TIFF 16-bit entero (Photoshop / Lightroom)"
+
+            tifffile.imwrite(path, out_img, compression='zlib', photometric=photometric)
+            self.log(f"Imagen guardada exitosamente ({desc}): {path}")
+            QMessageBox.information(
+                self, "Exportación Completada",
+                f"Imagen de trazas guardada con éxito en:\n{path}\n\nFormato: {desc} ({out_img.shape[1]}x{out_img.shape[0]} px)"
+            )
+        except Exception as e:
+            self.log(f"ERROR al guardar imagen: {e}")
+            QMessageBox.critical(self, "Error de Exportación", f"No se pudo guardar la imagen:\n{e}")
+
+    def _on_send_to_developer_clicked(self) -> None:
+        """Transfiere la imagen generada directamente al Revelador / Editor."""
+        img = self._get_best_image()
+        if img is None:
+            QMessageBox.warning(self, "Atención", "No hay imagen disponible para transferir.")
+            return
+
+        out_dir = os.path.join(os.getcwd(), "exportaciones")
+        os.makedirs(out_dir, exist_ok=True)
+        temp_path = os.path.join(out_dir, "startrail_processed_32bit.tif")
+
+        try:
+            out_f32 = np.ascontiguousarray(np.clip(img, 0.0, 1.0), dtype=np.float32)
+            tifffile.imwrite(temp_path, out_f32, compression='zlib', photometric='rgb')
+            self.log(f"Imagen transferida al Revelador: {temp_path}")
+            self.export_to_developer.emit(temp_path)
+        except Exception as e:
+            self.log(f"ERROR al transferir al Revelador: {e}")
+            QMessageBox.critical(self, "Error de Transferencia", f"No se pudo transferir al Revelador:\n{e}")

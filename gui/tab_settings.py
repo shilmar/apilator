@@ -345,7 +345,7 @@ class SettingsTab(QWidget):
         row_author_title.addWidget(lbl_work_title)
         row_author_title.addStretch()
 
-        lbl_engine_badge = QLabel("Apilator v0.6.1")
+        lbl_engine_badge = QLabel("Apilator v0.6.2")
         lbl_engine_badge.setStyleSheet("color: #80d8ff; font-size: 11px; font-weight: bold;")
         row_author_title.addWidget(lbl_engine_badge)
         author_layout.addLayout(row_author_title)

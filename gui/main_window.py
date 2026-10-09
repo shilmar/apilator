@@ -9,13 +9,14 @@ from PySide6.QtWidgets import QMainWindow, QTabWidget
 from gui.tab_stacker import StackerTab
 from gui.tab_developer import DeveloperTab
 from gui.tab_eclipse import EclipseTab
+from gui.tab_startrails import StartrailsTab
 from gui.tab_settings import SettingsTab
 
 
 class MainWindow(QMainWindow):
     """Ventana principal de la interfaz gráfica de Apilator."""
 
-    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.6.1)"
+    BASE_TITLE = "Apilator - Astrofotografía de Paisaje (v0.6.2)"
 
     def __init__(self):
         super().__init__()
@@ -32,12 +33,14 @@ class MainWindow(QMainWindow):
         self.tab_stacker = StackerTab()
         self.tab_developer = DeveloperTab()
         self.tab_eclipse = EclipseTab()
+        self.tab_startrails = StartrailsTab()
         self.tab_settings = SettingsTab()
 
         self.tab_widget.addTab(self.tab_stacker, "1. Apilador (Stacker)")
         self.tab_widget.addTab(self.tab_developer, "2. Revelador / Editor")
         self.tab_widget.addTab(self.tab_eclipse, "3. Eclipses (Solar / Lunar)")
-        self.tab_widget.addTab(self.tab_settings, "4. Configuración / Ajustes")
+        self.tab_widget.addTab(self.tab_startrails, "4. Trazas de Estrellas (Startrails)")
+        self.tab_widget.addTab(self.tab_settings, "5. Configuración / Ajustes")
 
         self.setCentralWidget(self.tab_widget)
 
@@ -52,6 +55,14 @@ class MainWindow(QMainWindow):
 
         # 4. Transferencia de imagen desde el módulo de Eclipses al Revelador
         self.tab_eclipse.export_to_developer.connect(self._on_eclipse_exported)
+
+        # 5. Transferencia de imagen desde el módulo de Startrails al Revelador
+        self.tab_startrails.export_to_developer.connect(self._on_startrail_exported)
+
+        # 6. Proveedor de máscara de horizonte del Apilador para Startrails
+        self.tab_startrails.set_stacker_mask_provider(
+            lambda: getattr(self.tab_stacker, "computed_mask", None)
+        )
 
     def _update_window_title(self, session_name: str) -> None:
         """Actualiza el texto de la barra de título con el archivo de proyecto activo."""
@@ -75,4 +86,13 @@ class MainWindow(QMainWindow):
         al Revelador / Editor y conmuta automáticamente a la pestaña 2.
         """
         self.tab_developer.load_image_direct(output_path, mask=None)
+        self.tab_widget.setCurrentIndex(1)
+
+    def _on_startrail_exported(self, output_path: str) -> None:
+        """
+        Transfiere la imagen 32-bit generada en el módulo de Startrails directamente
+        al Revelador / Editor y conmuta automáticamente a la pestaña 2.
+        """
+        final_mask = getattr(self.tab_startrails, "current_mask", None)
+        self.tab_developer.load_image_direct(output_path, mask=final_mask)
         self.tab_widget.setCurrentIndex(1)

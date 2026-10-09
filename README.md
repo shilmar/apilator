@@ -1,6 +1,6 @@
 # Apilator
 
-**Apilator** es una herramienta especializada de posprocesado, apilado y revelado para **astrofotografía de paisaje (nightscapes)** y **eclipses (solares y lunares)**. Permite desacoplar el movimiento del cielo respecto al horizonte terrestre, aplicar integración estadística Kappa-Sigma en coma flotante de 32 bits, procesar series de bracketing de eclipses con alineación subpíxel de limbo y filtro NRGF continuo, y editar la imagen final en tiempo real con asistencia de redes neuronales (GraXpert y StarNet++ v2).
+**Apilator** es una herramienta especializada de posprocesado, apilado y revelado para **astrofotografía de paisaje (nightscapes)**, **circumpolares / trazas de estrellas (startrails)** y **eclipses (solares y lunares)**. Permite desacoplar el movimiento del cielo respecto al horizonte terrestre, aplicar integración estadística Kappa-Sigma en coma flotante de 32 bits, componer circumpolares con efectos cometa y supresión automática de satélites, procesar series de bracketing de eclipses con alineación subpíxel de limbo y filtro NRGF continuo, y editar la imagen final en tiempo real con asistencia de redes neuronales (GraXpert y StarNet++ v2).
 
 ---
 
@@ -46,7 +46,27 @@
   - Filtro bilateral tangencial de alta frecuencia para realce selectivo de líneas de campo magnético solar.
 - **Exportación Dual 16-bit / 32-bit:** Exportación directa a TIFF de 16 bits optimizada (`uint16`, zlib, `photometric='rgb'`) compatible de forma nativa con Photoshop y Lightroom sin mapeos forzados de tono, y TIFF de 32 bits flotante para archivo maestro.
 
-### 6. Configuración, Rendimiento y Vitrina de Resultados
+### 6. Módulo Dedicado de Trazas de Estrellas (Startrails / Circumpolares)
+- **Streaming de Memoria $O(1)$:** Procesamiento secuencial sin cargar el lote completo en RAM, permitiendo componer cientos de tomas RAW o TIFF de ultra-alta resolución (24MP–60MP) sin consumo excesivo de memoria.
+- **Soporte de Tomas Dark:** Calibración térmica previa mediante Master Dark para eliminar píxeles calientes (*hot pixels*) antes de la integración.
+- **Algoritmo de Máximo Estándar (Lighten Clásico):** Fusión de luminancia máxima para trazas continuas.
+- **Algoritmo de Efecto Cometa / Estela Progresiva (Comet / Meteor Fade):**
+  - Ajuste porcentual de la longitud de la estela.
+  - Curvas de decaimiento matemático: lineal uniforme, cosenoidal suave y exponencial rápido.
+  - 3 modos de dirección temporal: hacia atrás (*backward*), hacia adelante (*forward*) y simétrico / ambos sentidos (*bidirectional*).
+  - Cota mínima de luminancia de fondo (*min_floor*) para conservar el cielo profundo.
+- **Fusión de Suelo Limpio (Separación Cielo / Suelo):**
+  - Eliminación del ruido térmico y sombras en el terreno integrando el suelo mediante promedio temporal o toma fija de referencia.
+  - Importación directa en un clic de la máscara de horizonte generada en el Apilador o carga de archivos de máscara externos (PNG, TIFF, FITS).
+  - Suavizado gaussiano de transición de bordes (*feathering*).
+- **Supresión Automática de Satélites y Aviones (Anti-Trazas Transitorias):**
+  - Detección temporal diferencial basada en el mínimo de dos referencias estadísticas simultáneas ($\min(I_A, I_B)$).
+  - Discriminación geométrica por elongación lineal (`cv2.minAreaRect`), reconectando destellos estroboscópicos de aviones y diferenciando satélites de estrellas en rotación.
+  - Exclusión automática del suelo mediante máscara de horizonte para ignorar vegetación o ramas que se muevan con el viento.
+  - Inpainting acelerado por caja envolvente local ($<0.15\text{ s}$ por toma) y sensibilidad ajustable (Baja, Media, Alta).
+- **Exportación Dual 16-bit / 32-bit y Enlace Directo:** Guardado en TIFF 16-bit (compatible con Photoshop y Lightroom sin mapeos de tono), TIFF 32-bit float, o transferencia instantánea al Revelador / Editor.
+
+### 7. Configuración, Rendimiento y Vitrina de Resultados
 - **Interfaz Moderna Unificada:** Paneles laterales oscuros con desplazamiento independiente mediante `QScrollArea`, consolas de registro (`txt_log`) fijas en la base en todos los módulos y diseño responsivo optimizado para pantallas compactas y monitores de alta resolución.
 - **Vitrina de Resultados Integrada (Showcase):** Panel visual en la pestaña de Configuración con visor responsivo antialias que exhibe astrofotografía real de paisaje procesada de principio a fin con Apilator, acreditación de autoría (*Fotografía y Procesado: Shilmar*) e inspección a resolución nativa.
 - **Aceleración por GPU Dual:** Soporte automático para NVIDIA CUDA mediante CuPy y conmutación transparente a CPU multinúcleo en equipos sin GPU dedicada.
@@ -68,8 +88,9 @@ apilator/
 │   ├── graxpert_bridge.py   # Conector CLI con GraXpert AI
 │   ├── masking.py           # Algoritmos de segmentación y refinado guiado de máscaras
 │   ├── project_manager.py   # Serialización y persistencia de proyectos (.mwstack)
-│   ├── starnet_bridge.py    # Conector y parser CLI con StarNet++ v2
 │   ├── stacking.py          # Motor de calibración (Dark/Flat/Bias), alineación y apilado
+│   ├── starnet_bridge.py    # Conector y parser CLI con StarNet++ v2
+│   ├── startrails.py        # Motor streaming de trazas, efectos cometa y supresión de satélites
 │   └── stretch.py           # Algoritmos MTF, ondículas À Trous, balance y tono
 └── gui/
     ├── assets/              # Recursos gráficos y fotografía de demostración
@@ -80,10 +101,10 @@ apilator/
     ├── tab_eclipse.py       # Pestaña de procesado integral de eclipses solares y lunares
     ├── tab_settings.py      # Pestaña de configuración de rutas y parámetros
     ├── tab_stacker.py       # Pestaña de apilado dual, calibración y máscaras
+    ├── tab_startrails.py    # Pestaña de generación de trazas de estrellas (Startrails)
     └── worker.py            # Orquestador de tareas en segundo plano multihilo (QThread)
 ```
 
-## Instalacion y Requisitos
 ## Requisitos del Sistema
 
 - **Python:** 3.10 o superior.
@@ -155,6 +176,19 @@ python run_app.py
 * Ajusta los parámetros del filtro **NRGF**: alcance de la corona (por defecto 3.5x), mezcla de filamentos (50%) y filtro tangencial para estirar y contrastar los filamentos coronales sin quemar las protuberancias.
 * Pulsa **Guardar TIFF 16-bit** para abrir directamente en Photoshop/Lightroom sin cuadros de diálogo de mapeo de tono, **Guardar TIFF 32-bit** para procesado HDR de alta fidelidad, o envíalo directamente al **Revelador / Editor**.
 
+### 4. Flujo de Creación de Trazas de Estrellas (Startrails)
+* Abre la pestaña **4. Trazas de Estrellas (Startrails)**.
+* Pulsa **📁 Cargar Serie...** y selecciona la secuencia temporal completa de tomas fijas (RAW, TIFF, FITS o JPG).
+* (Opcional) Pulsa **📌 Marcar REF** sobre la toma que servirá de encuadre o para el suelo de referencia.
+* (Opcional) Pulsa **Añadir Darks...** para sustraer el ruido térmico y píxeles calientes.
+* Selecciona el **Algoritmo de Trazas (Cielo)**:
+  - **⭐ Máximo Estándar (Lighten Clásico)** para circumpolares de trazo continuo.
+  - **☄️ Efecto Cometa / Estela Progresiva** ajustando longitud de estela (%), curva de decaimiento (lineal, cosenoidal suave o exponencial) y dirección temporal (hacia atrás, hacia adelante o simétrico/ambos sentidos).
+* Si tu serie contiene satélites artificiales o destellos de aviones, activa **🛸 Suprimir satélites y aviones automáticamente** y selecciona la sensibilidad deseada (Baja, Media o Alta).
+* Para eliminar por completo el ruido del terreno estático, activa **Activar Suelo Limpio (Eliminación de Ruido)** y pulsa **🖌️ Usar Máscara del Apilador** (o importa una máscara externa). Selecciona la integración del suelo (promedio temporal o toma de referencia) y el suavizado de borde (*feathering*).
+* Pulsa **⚡ Generar Trazas de Estrellas (Startrails)**.
+* Guarda el resultado en **TIFF 16-bit** (para edición directa en Photoshop/Lightroom) o **TIFF 32-bit**, o pulsa **➡️ Enviar al Revelador / Editor** para seguir procesando curvas, color y contraste.
+
 ## Hoja de Ruta
 [x] Apilado diferencial cielo/suelo con alineación estelar por homografía.
 [x] Rechazo estadístico Kappa-Sigma (MAD) libre de trazas de satélites y aviones.
@@ -165,7 +199,9 @@ python run_app.py
 [x] Descomposición y realce multiescala mediante ondículas À Trous.
 [x] Integración de StarNet++ v2 y GraXpert AI.
 [x] Rutina específica de apilado y alineación para eclipses solares y lunares (Módulo Eclipses con NRGF continuo y detección subpíxel).
-[ ] Procesado por lotes para secuencias de timelapse.
+[x] Módulo dedicado de Trazas de Estrellas (Startrails) con streaming O(1), efecto cometa, suelo limpio y supresión automática de satélites/aviones.
+[ ] Relleno continuo de saltos entre tomas (Gap Filling) en Startrails.
+[ ] Generación y exportación de secuencia acumulativa de fotogramas para vídeo Time-Lapse.
 [ ] Módulo de composición panorámica para mosaicos nocturnos.
 [ ] Exportación de perfiles de color ICC embebidos (sRGB / AdobeRGB / ProPhoto).
 ---

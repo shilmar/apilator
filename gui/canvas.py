@@ -4,6 +4,7 @@ gui/canvas.py - Lienzo interactivo acelerado para previsualización, zoom 100%
 y dibujo interactivo de trazos para la segmentación de cielo y suelo.
 """
 from typing import Optional, Tuple
+import cv2
 import numpy as np
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen, QPixmap
@@ -29,6 +30,7 @@ class MaskCanvas(QWidget):
         self.base_pixmap: Optional[QPixmap] = None
         self.scribble_pixmap: Optional[QPixmap] = None
         self.refined_overlay: Optional[QPixmap] = None
+        self.last_mask_array: Optional[np.ndarray] = None
 
         self.show_mask_overlay: bool = True
         self.show_scribbles: bool = True
@@ -120,8 +122,12 @@ class MaskCanvas(QWidget):
             if self.scribble_pixmap is None or self.scribble_pixmap.size() != self.base_pixmap.size():
                 self.scribble_pixmap = QPixmap(w, h)
                 self.scribble_pixmap.fill(Qt.transparent)
-            if self.refined_overlay and self.refined_overlay.size() != self.base_pixmap.size():
-                self.refined_overlay = None
+
+        # Si hay una máscara previa activa, regenerar el overlay ajustado a la nueva resolución
+        if self.last_mask_array is not None and self.show_mask_overlay:
+            self.set_refined_mask(self.last_mask_array)
+        elif self.refined_overlay and self.refined_overlay.size() != self.base_pixmap.size():
+            self.refined_overlay = None
 
         # Resetear centro de zoom si la nueva resolución es diferente
         if self.zoom_center_img:
@@ -263,12 +269,13 @@ class MaskCanvas(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.drawPixmap(target_rect, self.base_pixmap, source_rect)
 
-        if self.enable_masking and self.show_mask_overlay:
+        # Overlay de máscara (visible si show_mask_overlay es True, independientemente de enable_masking)
+        if self.show_mask_overlay:
             if self.refined_overlay and not self.refined_overlay.isNull():
                 painter.drawPixmap(target_rect, self.refined_overlay, source_rect)
             
-            if self.show_scribbles and self.scribble_pixmap and not self.scribble_pixmap.isNull():
-                painter.drawPixmap(target_rect, self.scribble_pixmap, source_rect)
+        if self.enable_masking and self.show_scribbles and self.scribble_pixmap and not self.scribble_pixmap.isNull():
+            painter.drawPixmap(target_rect, self.scribble_pixmap, source_rect)
 
     def get_scribbles_matrix(self) -> Optional[np.ndarray]:
         """
@@ -288,17 +295,50 @@ class MaskCanvas(QWidget):
         scribbles[(arr[..., 1] > arr[..., 0]) & has_stroke] = 2
         return scribbles
 
-    def set_refined_mask(self, mask_float: np.ndarray) -> None:
-        """Genera el overlay semitransparente coloreado para la máscara calculada."""
-        h, w = mask_float.shape
+    def set_refined_mask(self, mask_float: Optional[np.ndarray]) -> None:
+        """
+        Genera el overlay semitransparente coloreado para la máscara calculada.
+        Rojo: Suelo (0.0). Verde: Cielo (1.0).
+        """
+        if mask_float is None:
+            self.last_mask_array = None
+            self.refined_overlay = None
+            self.update()
+            return
+
+        self.last_mask_array = mask_float
+
+        if mask_float.ndim == 3:
+            mask_float = mask_float[..., 0]
+
+        mask_f = mask_float.astype(np.float32)
+        if mask_f.max() > 1.05:
+            mask_f = mask_f / 255.0
+        mask_f = np.clip(mask_f, 0.0, 1.0)
+
+        h, w = mask_f.shape
+
+        # Si hay una imagen base en el canvas, asegurar coincidencia exacta de resolución
+        if self.base_pixmap and not self.base_pixmap.isNull():
+            bw = self.base_pixmap.width()
+            bh = self.base_pixmap.height()
+            if (w != bw or h != bh) and bw > 0 and bh > 0:
+                mask_f = cv2.resize(mask_f, (bw, bh), interpolation=cv2.INTER_LINEAR)
+                h, w = bh, bw
+
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
         # Tinte rojo para suelo, verde para cielo con opacidad suave
-        rgba[..., 0] = ((1.0 - mask_float) * 220).astype(np.uint8)
-        rgba[..., 1] = (mask_float * 220).astype(np.uint8)
+        rgba[..., 0] = ((1.0 - mask_f) * 220).astype(np.uint8)
+        rgba[..., 1] = (mask_f * 220).astype(np.uint8)
         rgba[..., 2] = 30
-        rgba[..., 3] = 40
+        rgba[..., 3] = 50  # Opacidad semitransparente óptima
 
         rgba_contiguous = np.ascontiguousarray(rgba)
         qimg = QImage(rgba_contiguous.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
         self.refined_overlay = QPixmap.fromImage(qimg)
         self.update()
+
+    def _create_mask_pixmap(self, mask_float: np.ndarray) -> Optional[QPixmap]:
+        """Método de compatibilidad para generar el QPixmap de la máscara."""
+        self.set_refined_mask(mask_float)
+        return self.refined_overlay

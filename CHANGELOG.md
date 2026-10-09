@@ -3,6 +3,44 @@
 Todas las novedades, mejoras y correcciones notables de **Apilator** se documentan en este archivo.
 El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/) y este proyecto se adhiere a [Semantic Versioning](https://semver.org/lang/es/).
 
+## [0.6.2] - 2026-10-09
+
+### Añadido
+* **Nuevo Módulo Dedicado de Trazas de Estrellas (Startrails / Circumpolares):** Integración completa como **Pestaña 4** en la ventana principal, permitiendo la generación de trazas estelares de alta fidelidad fotométrica con streaming eficiente en memoria $O(1)$ sin importar el número ni tamaño de las tomas RAW/TIFF.
+* **Algoritmo de Máximo Estándar (Lighten Clásico):** Composición progresiva de luminancia máxima para trazas estelares continuas.
+* **Algoritmo de Efecto Cometa / Estela Progresiva (Comet / Meteor Fade):**
+  - Factor de longitud de estela ajustable porcentualmente (5% a 100%).
+  - Modulación de curva de decaimiento matemático: lineal uniforme, cosenoidal suave y exponencial rápido.
+  - 3 modos de dirección temporal: hacia atrás (*backward*, cola en tomas pasadas), hacia adelante (*forward*, cola en tomas futuras) y simétrico / ambos sentidos (*bidirectional*, cabeza brillante central con colas afiladas hacia pasado y futuro).
+  - Cota mínima de luminancia de fondo (*min_floor*) para evitar cielos artificialmente oscuros.
+* **Fusión de Suelo Limpio (Anti-Ruido) con Máscara de Horizonte:**
+  - Separación completa entre cielo de trazas y terreno estático.
+  - Modos de suelo seleccionables: promedio temporal de toda la serie (reducción drástica del ruido térmico y sombras en el terreno) o toma de referencia fija.
+  - Conexión e importación directa en un solo clic de la máscara de horizonte calculada en el Apilador (`🖌️ Usar Máscara del Apilador`) o carga desde archivos externos (PNG, TIFF, FITS).
+  - Suavizado gaussiano de borde de máscara ajustable (*feathering*).
+* **Supresión Automática de Trazas de Satélites y Aviones (Anti-Trazas Transitorias):**
+  - Detección adaptativa temporal con búfer deslizante inteligente y doble referencia estadística ($\min(I_A, I_B)$) en toda la serie, incluyendo fotogramas iniciales y finales.
+  - Cierre morfológico lineal que reconecta las pulsaciones discontinuas de luces estroboscópicas de aeronaves en trazas continuas.
+  - Discriminación geométrica por elongación lineal (`cv2.minAreaRect`), diferenciando matemáticamente trazas rectas ($\text{elongación} \ge 2.8 - 4.0$) de estrellas en rotación o cúmulos estelares circulares ($1.0 - 1.8$).
+  - Exclusión automática del suelo y vegetación en movimiento mediante la máscara de horizonte, evitando falsos positivos provocados por ramas o hierba mecidas por el viento.
+  - Inpainting y sustitución acelerada por caja envolvente (*bounding box slicing* local) con tiempo de cómputo inferior a $0.15\text{ s}$ por toma de 24.5 MP.
+  - Selector de sensibilidad ajustable: Baja, Media (por defecto) y Alta.
+* **Exportación y Flujo de Trabajo Directo:**
+  - Botones dedicados para exportación en **TIFF 16-bit** (compatible con Photoshop y Lightroom sin mapeos de tono) y **TIFF 32-bit Float** (rango dinámico HDR maestro).
+  - Botón de transferencia directa al **Revelador / Editor** (`➡️ Enviar al Revelador / Editor`) con carga instantánea de imagen y máscara.
+
+### Modificado
+* **Mejoras en el Visor y Canvas Interactivo (`gui/canvas.py`):**
+  - Desacoplamiento de la visualización de máscara de la herramienta de dibujo interactivo: ahora la superposición de máscara coloreada (verde cielo / rojo suelo) es visible en cualquier módulo con solo activar la casilla correspondiente.
+  - Auto-reescalado dinámico de la máscara a la resolución exacta de la imagen base cargada en el visor.
+* **Organización y Nomenclatura de Pestañas Principales:**
+  1. `1. Apilador (Stacker)`
+  2. `2. Revelador / Editor`
+  3. `3. Eclipses (Solar / Lunar)`
+  4. `4. Trazas de Estrellas (Startrails)`
+  5. `5. Configuración / Ajustes`
+* **Actualización de Versión:** Incremento general a **v0.6.2**.
+
 ---
 
 ## [0.6.1] - 2026-10-08
