@@ -278,6 +278,24 @@ class SettingsTab(QWidget):
         row_storage.addStretch()
         layout_perf.addLayout(row_storage)
 
+        # Estado de Aceleración Numba JIT
+        row_numba = QHBoxLayout()
+        lbl_numba_title = QLabel("Aceleración JIT (Numba LLVM):")
+        row_numba.addWidget(lbl_numba_title)
+
+        try:
+            from core.stacking import HAS_NUMBA
+        except Exception:
+            HAS_NUMBA = False
+
+        status_txt = "🟢 Activa (Kernels compilados en caché L1/L2)" if HAS_NUMBA else "⚪ Inactiva (Fallback a NumPy estándar)"
+        status_color = "#b9f6ca" if HAS_NUMBA else "#9e9e9e"
+        lbl_numba_status = QLabel(status_txt)
+        lbl_numba_status.setStyleSheet(f"color: {status_color}; font-weight: bold; font-size: 11px;")
+        row_numba.addWidget(lbl_numba_status)
+        row_numba.addStretch()
+        layout_perf.addLayout(row_numba)
+
         left_layout.addWidget(grp_perf)
 
         # -------------------------------------------------------------

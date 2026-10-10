@@ -10,6 +10,128 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from astropy.io import fits
 
+# Aceleración nativa de CPU con Numba (fallback transparente a NumPy si no está disponible)
+try:
+    import numba
+    from numba import njit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+if HAS_NUMBA:
+    @njit(fastmath=True)
+    def _sort_inplace(arr):
+        """Ordenamiento por inserción in-place ultrarrápido para vectores locales pequeños (N <= 100)."""
+        n = len(arr)
+        for i in range(1, n):
+            key = arr[i]
+            j = i - 1
+            while j >= 0 and arr[j] > key:
+                arr[j + 1] = arr[j]
+                j -= 1
+            arr[j + 1] = key
+
+    @njit(parallel=True, fastmath=True, nogil=True)
+    def _kappa_sigma_kernel_numba(data, kappa):
+        """
+        Kernel compilado en LLVM para integración Kappa-Sigma con MAD en una sola pasada.
+        Opera en memoria caché L1/L2 con cero asignaciones en el heap de Python.
+        data: shape (n_frames, total_items)
+        """
+        n_frames, total_items = data.shape
+        out = np.empty(total_items, dtype=np.float32)
+
+        for p in prange(total_items):
+            # 1. Copiar valores locales a un buffer de pila
+            v = np.empty(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                v[i] = data[i, p]
+
+            # 2. Mediana local
+            _sort_inplace(v)
+            if n_frames % 2 == 1:
+                med = v[n_frames // 2]
+            else:
+                med = 0.5 * (v[n_frames // 2 - 1] + v[n_frames // 2])
+
+            # 3. Desviaciones absolutas respecto a la mediana
+            d = np.empty(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                d[i] = abs(data[i, p] - med)
+
+            # 4. MAD (Median Absolute Deviation)
+            _sort_inplace(d)
+            if n_frames % 2 == 1:
+                mad = d[n_frames // 2]
+            else:
+                mad = 0.5 * (d[n_frames // 2 - 1] + d[n_frames // 2])
+
+            sigma = 1.4826 * mad + 1e-6
+            low = med - kappa * sigma
+            high = med + kappa * sigma
+
+            # 5. Promedio de valores válidos
+            s = 0.0
+            cnt = 0
+            for i in range(n_frames):
+                val = data[i, p]
+                if low <= val <= high:
+                    s += val
+                    cnt += 1
+
+            if cnt > 0:
+                out[p] = s / cnt
+            else:
+                out[p] = med
+
+        return out
+
+    @njit(parallel=True, fastmath=True, nogil=True)
+    def _percentile_kernel_numba(data, target_p):
+        """Kernel compilado para cálculo exacto de percentil con interpolación lineal."""
+        n_frames, total_items = data.shape
+        out = np.empty(total_items, dtype=np.float32)
+        rank = (target_p / 100.0) * (n_frames - 1)
+        i0 = int(rank)
+        i1 = min(i0 + 1, n_frames - 1)
+        frac = float(rank - i0)
+
+        for p in prange(total_items):
+            v = np.empty(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                v[i] = data[i, p]
+            _sort_inplace(v)
+            out[p] = v[i0] + frac * (v[i1] - v[i0])
+
+        return out
+
+    @njit(parallel=True, fastmath=True, nogil=True)
+    def _median_kernel_numba(data):
+        """Kernel compilado para cálculo rápido de mediana en franjas."""
+        n_frames, total_items = data.shape
+        out = np.empty(total_items, dtype=np.float32)
+
+        for p in prange(total_items):
+            v = np.empty(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                v[i] = data[i, p]
+            _sort_inplace(v)
+            if n_frames % 2 == 1:
+                out[p] = v[n_frames // 2]
+            else:
+                out[p] = 0.5 * (v[n_frames // 2 - 1] + v[n_frames // 2])
+
+        return out
+
+    # Calentamiento JIT anticipado con arrays mínimos de prueba
+    try:
+        _dummy = np.zeros((2, 2), dtype=np.float32)
+        _kappa_sigma_kernel_numba(_dummy, 2.2)
+        _percentile_kernel_numba(_dummy, 50.0)
+        _median_kernel_numba(_dummy)
+    except Exception:
+        pass
+
 
 def load_image_as_float32(filepath: str) -> np.ndarray:
     """Carga imágenes optimizando memoria con operaciones in-place."""
@@ -111,7 +233,6 @@ def _median_stack_chunked(file_paths: list, chunk_size: int = 500, temp_dir: str
             img.tofile(tmp_p)
             tmp_files.append(tmp_p)
             del img
-            gc.collect()
 
         # 2. Asignar matriz final
         master = np.empty((h, w, c), dtype=np.float32)
@@ -132,7 +253,11 @@ def _median_stack_chunked(file_paths: list, chunk_size: int = 500, temp_dir: str
                     raw_bytes = fp.read(read_bytes)
                     chunk_buf[f_idx] = np.frombuffer(raw_bytes, dtype=np.float32).reshape((chunk_rows, w, c))
 
-            master[y1:y2] = np.median(chunk_buf, axis=0).astype(np.float32)
+            if HAS_NUMBA:
+                flat_chunk = chunk_buf.reshape(n_frames, -1)
+                master[y1:y2] = _median_kernel_numba(flat_chunk).reshape((chunk_rows, w, c))
+            else:
+                master[y1:y2] = np.median(chunk_buf, axis=0).astype(np.float32)
             del chunk_buf
 
     finally:
@@ -299,7 +424,6 @@ def preprocess_subframe_lp(
         if m2d is not None:
             del m2d
         del bg_low
-        gc.collect()
         return frame_rgb
 
     elif method == "local_norm" and ref_stats is not None:
@@ -328,7 +452,6 @@ def preprocess_subframe_lp(
 
         if m2d is not None:
             del m2d
-        gc.collect()
         return frame_rgb
 
     return frame_rgb
@@ -496,7 +619,6 @@ def align_single_light_task(args: tuple) -> dict:
         res["inliers"] = num_inliers
         res["dx"] = float(H_matrix[0, 2])
         res["dy"] = float(H_matrix[1, 2])
-        gc.collect()
 
     except Exception as exc:
         res["error"] = str(exc)
@@ -533,36 +655,44 @@ def _process_single_chunk_cpu(args):
 
     if lp_method == "min_rejection" and lp_strength > 1e-4:
         target_p = max(5.0, 50.0 - (lp_strength * 40.0))
-        for ch in range(c):
-            channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-            res = np.percentile(channel_data, target_p, axis=0)
-            chunk_result[:, :, ch] = res.reshape((actual_rows, w))
+        if HAS_NUMBA:
+            flat_data = sub_stack.reshape(n_frames, -1)
+            chunk_result = _percentile_kernel_numba(flat_data, target_p).reshape((actual_rows, w, c))
+        else:
+            for ch in range(c):
+                channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
+                res = np.percentile(channel_data, target_p, axis=0)
+                chunk_result[:, :, ch] = res.reshape((actual_rows, w))
         del sub_stack
         return y_start, y_end, chunk_result
 
     # Rechazo estricto en CPU
-    for ch in range(c):
-        channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
-        
-        med = np.median(channel_data, axis=0)
-        abs_diff = np.abs(channel_data - med)
-        mad = np.median(abs_diff, axis=0)
-        sigma = 1.4826 * mad + 1e-6
+    if HAS_NUMBA:
+        flat_data = sub_stack.reshape(n_frames, -1)
+        chunk_result = _kappa_sigma_kernel_numba(flat_data, kappa).reshape((actual_rows, w, c))
+    else:
+        for ch in range(c):
+            channel_data = sub_stack[:, :, :, ch].reshape((n_frames, -1))
+            
+            med = np.median(channel_data, axis=0)
+            abs_diff = np.abs(channel_data - med)
+            mad = np.median(abs_diff, axis=0)
+            sigma = 1.4826 * mad + 1e-6
 
-        low = med - kappa * sigma
-        high = med + kappa * sigma
+            low = med - kappa * sigma
+            high = med + kappa * sigma
 
-        valid = (channel_data >= low) & (channel_data <= high)
-        
-        counts = np.sum(valid, axis=0)
-        sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
-        
-        fallback = counts == 0
-        counts[fallback] = 1
-        res = sums / counts
-        res[fallback] = med[fallback]
+            valid = (channel_data >= low) & (channel_data <= high)
+            
+            counts = np.sum(valid, axis=0)
+            sums = np.sum(np.where(valid, channel_data, 0.0), axis=0)
+            
+            fallback = counts == 0
+            counts[fallback] = 1
+            res = sums / counts
+            res[fallback] = med[fallback]
 
-        chunk_result[:, :, ch] = res.reshape((actual_rows, w))
+            chunk_result[:, :, ch] = res.reshape((actual_rows, w))
 
     del sub_stack
     return y_start, y_end, chunk_result

@@ -5,6 +5,29 @@ El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-10
+
+### Añadido
+* **Motor Kappa-Sigma y Rechazo Estadístico Compilado con Numba (JIT LLVM):**
+  - Implementación de kernels de compilación JIT en código máquina de alta eficiencia con `numba.njit(parallel=True, fastmath=True, nogil=True)`.
+  - Kernel `_kappa_sigma_kernel_numba`: cálculo del MAD (Median Absolute Deviation), límites $[\mu - \kappa\sigma, \mu + \kappa\sigma]$ y suma de valores válidos en una sola pasada a nivel de registros y memoria caché L1/L2/L3 de la CPU.
+  - Kernel `_percentile_kernel_numba`: cálculo optimizado de percentiles con interpolación lineal y ordenación por inserción en la pila para el rechazo asimétrico de polución lumínica (`min_rejection`).
+  - Kernel `_median_kernel_numba`: cálculo de mediana acelerado para la generación por franjas de tomas maestras de calibración (Darks, Flats, Bias).
+  - Eliminación total de asignaciones masivas en el heap de Python y matrices booleanas intermedias gigantes de NumPy (`valid = (channel_data >= low) & ...`), lo que reduce drásticamente el consumo de memoria RAM durante la integración.
+  - Calentamiento anticipado (*pre-warming*) de los kernels JIT durante el inicio de la aplicación para evitar latencias de compilación en el primer fotograma.
+  - Badge de hardware dinámico en el panel de Configuración que refleja el estado de activación del compilador JIT Numba.
+
+### Modificado
+* **Supresión de Pausas de Garbage Collector en Multi-hilo (Alineación Instantánea):**
+  - Eliminación de llamadas per-frame a `gc.collect()` en `align_single_light_task` y `preprocess_subframe_lp` (que provocaban hasta 60 detenciones completas de GC en lotes de 30 fotos).
+  - Erradicación de las pausas *Stop-the-World* y contención del GIL (Global Interpreter Lock) que serializaban y congelaban los hilos de trabajo paralelos en `ThreadPoolExecutor`.
+  - La liberación de memoria de las matrices temporales intermedias (`warped_processed`, `raw_frame`) se delega en el conteo de referencias determinista de CPython (`free()` inmediato a nivel de C sin sobrecoste).
+  - Preservación de limpiezas macro de recolección de basura exclusivamente en las transiciones de fases (`gui/worker.py`), asegurando que la memoria se mantenga limpia sin penalizar los tiempos de cómputo.
+* **Actualización de Versión:** Incremento general a **v0.6.4**.
+
+### Rendimiento
+* Reducción drástica del tiempo total de apilado y alineación: el tiempo global de procesamiento para lotes de prueba ha descendido de **1m 40s a 56 segundos** (reducción cercana al 45% en tiempo de cómputo total).
+
 ## [0.6.3] - 2026-10-09
 
 ### Añadido
